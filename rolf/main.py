@@ -1,5 +1,5 @@
 from cfg import get_cfg
-from models import *
+from LowOFULmodels import *
 from util import *
 
 MOTHER_PATH = "."
@@ -302,6 +302,23 @@ def bilinear_run_trials(
                     theoretical_init_explore=False,
                 )
 
+        elif agent_type == "low_oful":
+
+            ## TODO: adjust the hyperparameter
+            agent = ESTRLowOFUL(
+                d1=d_x,
+                d2=d_y,
+                r=(int)(0.75 * min(d_x, d_y)),
+                T1=(int)(horizon * 1 / 3),
+                lam=0.8,
+                lam_perp=0.8,
+                B=1.0,
+                B_perp=1.0,
+                delta=0.99,
+                sigma=1.0,
+                random_state=123,
+            )
+
         ## sample features
         ## X_star: (d_x_star, M)
         ## X: (d_x, M)
@@ -438,7 +455,7 @@ def bilinear_run(
             distribution=noise_dist, size=1, std=noise_std, random_state=random_state_
         )
 
-        if isinstance(agent, BiRoLFLasso):
+        if isinstance(agent, (BiRoLFLasso, ESTRLowOFUL)):
             chosen_action = agent.choose(x, y)
         elif isinstance(agent, ContextualBandit):
             chosen_action = agent.choose(z)
@@ -448,7 +465,7 @@ def bilinear_run(
         chosen_reward = exp_rewards_mat[chosen_i][chosen_j] + noise
 
         # HERE
-        if t % 10 == 0  and verbose:
+        if t % 10 == 0 and verbose:
             try:
                 string = f"""
                         case : {cfg.case}, SEED : {cfg.seed}, M : {cfg.arm_x}, N: {cfg.arm_y},
@@ -464,7 +481,7 @@ def bilinear_run(
                         Trial : {trial}, p : {cfg.p}, Agent : {agent.__class__.__name__},
                         Round : {t+1}, optimal : {optimal_action}, chosen action: {ij_to_action(chosen_i,chosen_j,cfg.arm_y)}
                     """
-                
+
             save_log(path=LOG_PATH, fname=fname, string=" ".join(string.split()))
             print(" ".join(string.split()))
 
@@ -472,7 +489,7 @@ def bilinear_run(
         regrets[t] = optimal_reward - exp_rewards_mat[chosen_i, chosen_j]
 
         ## update the agent
-        if isinstance(agent, BiRoLFLasso):
+        if isinstance(agent, (BiRoLFLasso, ESTRLowOFUL)):
             agent.update(x=x, y=y, r=chosen_reward)
         elif isinstance(agent, ContextualBandit):
             agent.update(x=z, r=chosen_reward)
@@ -568,6 +585,7 @@ if __name__ == "__main__":
         "linucb",
         "lints",
         "mab_ucb",
+        "low_oful",
     ]
     case = cfg.case
 
