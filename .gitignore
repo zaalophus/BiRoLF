@@ -1,0 +1,14 @@
+*.txt
+*.zip
+*.pt
+*.txt
+.DS_Store
+playground*.py
+
+__pycache__/
+*.pyc
+mnist/
+.ipynb_checkpoints/
+figures/
+results/
+logs/
