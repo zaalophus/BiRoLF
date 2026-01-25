@@ -398,6 +398,9 @@ class RoLFLasso(ContextualBandit):
         )  # history of rounds that the pseudo action and the chosen action matched
         self.explore = explore
         self.init_explore = init_explore
+        self.fista_max_iter = 200
+        self.fista_tol = 1e-6
+        self._arm_indices = np.arange(self.K)
 
     def choose(self, x: np.ndarray):
         # x : (K, d) augmented feature matrix where each row denotes the augmented features
@@ -420,36 +423,21 @@ class RoLFLasso(ContextualBandit):
         self._ahat_history = getattr(self, "_ahat_history", {})
         self._ahat_history[self.t] = a_hat
 
-        ## sampling actions
-        pseudo_action = -1
-        chosen_action = -2
+        ## sampling actions (resample chosen and pseudo until match or max_iter)
         count = 0
-
-        ## ~! rho_t !~ ##
         max_iter = int(np.log((self.t + 1) ** 2 / self.delta) / np.log(1 / self.p))
 
-        ## ~! phi_t !~ ##
-        pseudo_dist = np.array([(1 - self.p) / (self.K - 1)] * self.K, dtype=float)
-        pseudo_dist[a_hat] = self.p
+        chosen_dist = np.full(self.K, (1.0 / np.sqrt(self.t)) / max(self.K - 1, 1), dtype=float)
+        chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        ## ~! epsilon(sqrt(t))-greedy ~! ##
-        chosen_dist = np.array(
-            [(1 / np.sqrt(self.t)) / (self.K - 1)] * self.K, dtype=float
-        )
-        chosen_dist[a_hat] = 1 - (1 / np.sqrt(self.t))
-        
+        pseudo_action = -1
+        chosen_action = -2
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            ## Sample the pseudo action
-            pseudo_action = np.random.choice(
-                [i for i in range(self.K)], size=1, replace=False, p=pseudo_dist
-            ).item()
-            ## Sample the chosen action
-            chosen_action = np.random.choice(
-                [i for i in range(self.K)], size=1, replace=False, p=chosen_dist
-            ).item()
+            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
+            pseudo_dist = np.full(self.K, (1.0 - self.p) / max(self.K - 1, 1), dtype=float)
+            pseudo_dist[chosen_action] = self.p
+            pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
             count += 1
-
-        self.action_history.append(chosen_action)  # add to the history
         self.pseudo_action = pseudo_action
         self.chosen_action = chosen_action
         return chosen_action
@@ -457,6 +445,17 @@ class RoLFLasso(ContextualBandit):
     def update(self, x: np.ndarray, r: float):
         # x : (K, K) augmented feature matrix
         # r : reward of the chosen_action
+        if self.pseudo_action != self.chosen_action:
+            self.matching[self.t] = (
+                (self.pseudo_action == self.chosen_action),
+                None,
+                None,
+                None,
+                None,
+            )
+            return
+
+        self.action_history.append(self.chosen_action)
         self.reward_history.append(r)
 
         # lam_impute = 2 * self.p * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
@@ -470,75 +469,86 @@ class RoLFLasso(ContextualBandit):
         lam_main   = self.lam_c_main * ((1 + 2 / self.p) * self.sigma *
               np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta)))
 
-        # print(f"x : {x.shape}")
-        gram = x.T @ x
-        gram_sqrt = matrix_sqrt(gram)
+        ## compute the imputation estimator (FISTA on quadratic form)
+        data_impute = x[self.action_history, :]  # (t, d) matrix
+        target_impute = np.array(self.reward_history)
+        G_imp = data_impute.T @ data_impute
+        b_imp = data_impute.T @ target_impute
+        L_imp = 2.0 * max(float(np.max(np.linalg.eigvalsh(G_imp))), 1e-12)
+        mu_impute = fista_lasso_vector(
+            G_imp,
+            b_imp,
+            lam_impute,
+            self.impute_prev,
+            L_imp,
+            self.fista_max_iter,
+            self.fista_tol,
+            use_fista=True,
+        )
 
-        if self.pseudo_action == self.chosen_action:
-            ## compute the imputation estimator
-            data_impute = x[self.action_history, :]  # (t, d) matrix
-            target_impute = np.array(self.reward_history)
-            # print(f"gram_sqrt : {gram_sqrt.shape}")
-            # print(f"impute_prev : {self.impute_prev.shape}")
-            mu_impute = scipy.optimize.minimize(
-                self.__imputation_loss,
-                (gram_sqrt @ self.impute_prev),
-                args=(data_impute, target_impute, lam_impute),
-                method="SLSQP",
-                options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
-            ).x
+        ## compute and update the pseudo rewards
+        if self.matching:
+            for key in self.matching:
+                matched, data, _, chosen, reward = self.matching[key]
+                if matched:
+                    new_pseudo_rewards = data @ mu_impute
+                    new_pseudo_rewards[chosen] += (1 / self.p) * (
+                        reward - (data[chosen, :] @ mu_impute)
+                    )
+                    # overwrite the value
+                    self.matching[key] = (
+                        matched,
+                        data,
+                        new_pseudo_rewards,
+                        chosen,
+                        reward,
+                    )
 
-            ## compute and update the pseudo rewards
-            if self.matching:
-                for key in self.matching:
-                    matched, data, _, chosen, reward = self.matching[key]
-                    if matched:
-                        new_pseudo_rewards = data @ mu_impute
-                        new_pseudo_rewards[chosen] += (1 / self.p) * (
-                            reward - (data[chosen, :] @ mu_impute)
-                        )
-                        # overwrite the value
-                        self.matching[key] = (
-                            matched,
-                            data,
-                            new_pseudo_rewards,
-                            chosen,
-                            reward,
-                        )
+        ## compute the pseudo rewards for the current data
+        pseudo_rewards = x @ mu_impute
+        pseudo_rewards[self.chosen_action] += (1 / self.p) * (
+            r - (x[self.chosen_action, :] @ mu_impute)
+        )
+        self.matching[self.t] = (
+            (self.pseudo_action == self.chosen_action),
+            x,
+            pseudo_rewards,
+            self.chosen_action,
+            r,
+        )
 
-            ## compute the pseudo rewards for the current data
-            pseudo_rewards = x @ mu_impute
-            pseudo_rewards[self.chosen_action] += (1 / self.p) * (
-                r - (x[self.chosen_action, :] @ mu_impute)
-            )
-            self.matching[self.t] = (
-                (self.pseudo_action == self.chosen_action),
-                x,
-                pseudo_rewards,
-                self.chosen_action,
-                r,
-            )
+        ## compute the main estimator (FISTA on stacked quadratic form)
+        matched_keys = [key for key, value in self.matching.items() if value[0]]
+        X_list = [self.matching[key][1] for key in matched_keys]
+        pseudo_rewards_list = [self.matching[key][2] for key in matched_keys]
+        X_main = np.vstack(X_list)
+        y_main = np.concatenate(pseudo_rewards_list)
+        G_main = X_main.T @ X_main
+        b_main = X_main.T @ y_main
+        L_main = 2.0 * max(float(np.max(np.linalg.eigvalsh(G_main))), 1e-12)
+        optimization_start_time = time.time()
+        mu_main = fista_lasso_vector(
+            G_main,
+            b_main,
+            lam_main,
+            self.main_prev,
+            L_main,
+            self.fista_max_iter,
+            self.fista_tol,
+            use_fista=True,
+        )
+        optimization_time = time.time() - optimization_start_time
 
-            ## compute the main estimator
-            mu_main = scipy.optimize.minimize(
-                self.__main_loss,
-                (gram_sqrt @ self.main_prev),
-                args=(lam_main, self.matching),
-                method="SLSQP",
-                options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
-            ).x
+        if hasattr(self, "_timing_data") and self._timing_data is not None:
+            agent = self.__class__.__name__
+            trial = getattr(self, "_trial", 0)
+            self._timing_data.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
 
-            ## update the mu_hat
-            self.mu_hat = mu_main
-            self.mu_check = mu_impute
-        else:
-            self.matching[self.t] = (
-                (self.pseudo_action == self.chosen_action),
-                None,
-                None,
-                None,
-                None,
-            )
+        ## update the mu_hat
+        self.mu_hat = mu_main
+        self.mu_check = mu_impute
+        self.impute_prev = mu_impute
+        self.main_prev = mu_main
 
     def __imputation_loss(
         self, beta: np.ndarray, X: np.ndarray, y: np.ndarray, lam: float
@@ -619,6 +629,20 @@ class RoLFRidge(ContextualBandit):
         self.xty_impute = np.zeros(self.K)
         self.explore = explore
         self.init_explore = init_explore
+        self._static_arms_initialized = False
+        self.X_static = None
+        self.G_main = None
+        self.G_eigvals = None
+        self.G_eigvecs = None
+
+    def _init_main_cache(self, x: np.ndarray) -> None:
+        if self._static_arms_initialized:
+            return
+        # RoLF uses a fixed action feature matrix across rounds in this codebase.
+        self.X_static = x
+        self.G_main = self.X_static.T @ self.X_static
+        self.G_eigvals, self.G_eigvecs = np.linalg.eigh(self.G_main)
+        self._static_arms_initialized = True
 
     def choose(self, x: np.ndarray):
         # x : (K, d) augmented feature matrix where each row denotes the augmented features
@@ -673,6 +697,7 @@ class RoLFRidge(ContextualBandit):
         # x : (K, K) augmented feature matrix
         # r : reward of the chosen_action
         if self.pseudo_action == self.chosen_action:
+            self._init_main_cache(x)
             ## compute the imputation estimator based on history
             chosen_context = x[self.chosen_action, :]
             self.Vinv_impute = shermanMorrison(self.Vinv_impute, chosen_context)
@@ -680,6 +705,8 @@ class RoLFRidge(ContextualBandit):
             mu_impute = self.Vinv_impute @ self.xty_impute
 
             ## compute and update the pseudo rewards
+            sum_pseudo = np.zeros(self.K)
+            gamma = 0
             if self.matching:
                 for key in self.matching:
                     matched, data, _, chosen, reward = self.matching[key]
@@ -696,6 +723,8 @@ class RoLFRidge(ContextualBandit):
                             chosen,
                             reward,
                         )
+                        sum_pseudo += new_pseudo_rewards
+                        gamma += 1
 
             ## compute the pseudo rewards for the current data
             pseudo_rewards = x @ mu_impute
@@ -709,9 +738,13 @@ class RoLFRidge(ContextualBandit):
                 self.chosen_action,
                 r,
             )
+            sum_pseudo += pseudo_rewards
+            gamma += 1
 
-            ## compute the main estimator
-            mu_main = self.__main_estimation(self.matching, dimension=self.K)
+            ## compute the main estimator using cached eigendecomposition
+            b_main = self.X_static.T @ sum_pseudo
+            denom = 1.0 + gamma * self.G_eigvals
+            mu_main = self.G_eigvecs @ ((self.G_eigvecs.T @ b_main) / denom)
 
             ## update the mu_hat
             self.mu_hat = mu_main
@@ -1033,7 +1066,7 @@ class BiRoLFLasso(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (self.i_hat, self.j_hat)
 
-        ## sampling actions (paper: sample chosen once, resample pseudo only)
+        ## sampling actions (resample chosen and pseudo until match or max_iter)
         total_arms = self.M * self.N
         max_iter = int(
             np.log(2 * ((self.t + 1) ** 2) / self.delta) / np.log(1 / (1 - self.p))
@@ -1041,13 +1074,14 @@ class BiRoLFLasso(ContextualBandit):
 
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
-        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
 
-        pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
-        pseudo_dist[chosen_action] = self.p
         pseudo_action = -1
+        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
+            pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
+            pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
             count += 1
 
@@ -1494,20 +1528,20 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (i_hat, j_hat)
 
-        # pseudo / chosen sampling (paper: joint action, resample pseudo only)
+        # pseudo / chosen sampling (resample chosen and pseudo until match or max_iter)
         total_arms = self.M * self.N
         max_iter = int(np.log(2 * ((self.t + 1) ** 2) / self.delta) / np.log(1 / (1 - self.p)))
 
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
-        chosen_action = np.random.choice(np.arange(total_arms), p=chosen_dist).item()
-
-        pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
-        pseudo_dist[chosen_action] = self.p
 
         count = 0
         pseudo_action = -1
+        chosen_action = -2
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(np.arange(total_arms), p=chosen_dist).item()
+            pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
+            pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(np.arange(total_arms), p=pseudo_dist).item()
             count += 1
 

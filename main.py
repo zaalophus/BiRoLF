@@ -511,7 +511,7 @@ def bilinear_run_trial(
     # print(f"Agent : {agent.__class__.__name__}\t data shape : {data.shape}")
 
     # Set timing data for BiRoLF agents
-    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['BiRoLFLasso', 'BiRoLFLasso_FISTA', 'BiRoLFLasso_Blockwise']:
+    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso', 'BiRoLFLasso_FISTA', 'BiRoLFLasso_Blockwise']:
         agent._timing_data = timing_data
         agent._trial = now_trial
 
@@ -733,7 +733,7 @@ def bilinear_run_agent(args):
 
 
 def plot_optimization_timing_comparison():
-    """Plot average optimization time comparison between BiRoLFLasso and BiRoLFLasso_FISTA"""
+    """Plot average optimization time comparison for RoLFLasso and BiRoLFLasso variants"""
     if not TIMING_DATA:
         print("No timing data available for optimization comparison.")
         return
@@ -741,19 +741,31 @@ def plot_optimization_timing_comparison():
     # Calculate average optimization times
     avg_times = {}
     std_times = {}
-    
-    for agent_name in ['BiRoLFLasso', 'BiRoLFLasso_FISTA']:
+
+    agent_order = [
+        "RoLFLasso",
+        "BiRoLFLasso",
+        "BiRoLFLasso_FISTA",
+        "BiRoLFLasso_Blockwise",
+    ]
+    display_names = {
+        "RoLFLasso": "RoLF-Lasso",
+        "BiRoLFLasso": "BiRoLF-Lasso",
+        "BiRoLFLasso_FISTA": "BiRoLF-Lasso-FISTA",
+        "BiRoLFLasso_Blockwise": "BiRoLF-Lasso-Blockwise",
+    }
+
+    for agent_name in agent_order:
         if agent_name in TIMING_DATA:
             all_times = []
             for trial_times in TIMING_DATA[agent_name].values():
                 all_times.extend(trial_times)
-            
             if all_times:
                 avg_times[agent_name] = np.mean(all_times)
                 std_times[agent_name] = np.std(all_times)
-    
-    if len(avg_times) < 2:
-        print("Need both BiRoLFLasso and BiRoLFLasso_FISTA timing data for comparison.")
+
+    if not avg_times:
+        print("No optimization timing data to plot.")
         return
     
     # Create bar plot with enhanced visualization
@@ -764,7 +776,13 @@ def plot_optimization_timing_comparison():
     errors = [std_times[agent] for agent in agents]
     
     # Create bars with different colors and transparency for variance
-    colors = ['#4472C4', '#E15759']  # Professional colors
+    palette = {
+        "RoLFLasso": "#6B7280",
+        "BiRoLFLasso": "#4472C4",
+        "BiRoLFLasso_FISTA": "#E15759",
+        "BiRoLFLasso_Blockwise": "#59A14F",
+    }
+    colors = [palette.get(agent, "#A5A5A5") for agent in agents]
     x_pos = np.arange(len(agents))
     
     # Main bars
@@ -785,21 +803,17 @@ def plot_optimization_timing_comparison():
                 f'{time_val:.6f}s\n±{err:.6f}s', ha='center', va='bottom', 
                 fontweight='bold', fontsize=11)
     
-    # Add speedup annotation
-    if 'BiRoLFLasso' in avg_times and 'BiRoLFLasso_FISTA' in avg_times:
-        speedup = avg_times['BiRoLFLasso'] / avg_times['BiRoLFLasso_FISTA']
-        ax.text(0.5, max(times) * 0.6, f'FISTA is {speedup:.2f}x faster', 
-                ha='center', va='center', fontsize=16, fontweight='bold',
-                bbox=dict(boxstyle="round,pad=0.5", facecolor="yellow", alpha=0.8, edgecolor='orange'))
-    
     ax.set_ylabel('Average Optimization Time (seconds)', fontsize=14, fontweight='bold')
-    ax.set_title(f'Optimization Time Comparison\n(M={cfg.arm_x}, N={cfg.arm_y}, T={cfg.horizon}, Trials={cfg.trials})', 
-                fontsize=16, fontweight='bold')
+    title_params = (
+        f"Case_{cfg.case}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_"
+        f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}"
+    )
+    ax.set_title(f'Optimization Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
     
     # Make agent names more readable
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(['BiRoLF-Lasso\n(Original)', 'BiRoLF-Lasso-FISTA\n(Accelerated)'], fontsize=12)
+    ax.set_xticklabels([display_names.get(agent, agent) for agent in agents], fontsize=12)
     
     # Add legend for variance shading
     ax.legend(loc='upper right', framealpha=0.9)
@@ -821,9 +835,6 @@ def plot_optimization_timing_comparison():
     print("="*60)
     for agent_name in agents:
         print(f"{agent_name}: {avg_times[agent_name]:.6f} ± {std_times[agent_name]:.6f} seconds")
-    if len(agents) == 2:
-        speedup = avg_times[agents[0]] / avg_times[agents[1]]
-        print(f"\nSpeedup (FISTA): {speedup:.2f}x")
     print("="*60)
 
 
@@ -892,8 +903,11 @@ def plot_total_execution_time_comparison():
     ax.set_yticks(y_pos)
     ax.set_yticklabels([AGENT_DICT.get(agent, agent) for agent in sorted_agents], fontsize=11)
     ax.set_xlabel('Total Execution Time per Trial (seconds)', fontsize=14, fontweight='bold')
-    ax.set_title(f'Total Execution Time Comparison\n(M={cfg.arm_x}, N={cfg.arm_y}, T={cfg.horizon}, Trials={cfg.trials})', 
-                fontsize=16, fontweight='bold')
+    title_params = (
+        f"Case_{cfg.case}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_"
+        f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}"
+    )
+    ax.set_title(f'Total Execution Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='x', linestyle='--')
     
     # Highlight BiRoLF algorithms
