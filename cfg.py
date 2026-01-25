@@ -85,6 +85,7 @@ def get_cfg():
     parser.add_argument("--block_uo_max_iter", type=int, default=50)
     parser.add_argument("--block_tol", type=float, default=1e-6)
     parser.add_argument("--block_use_fista", type=str2bool, default=True)
+    parser.add_argument("--block_use_batched", type=str2bool, default=True)
 
     # --- Optional BLAS thread control for multiprocessing ---
     parser.add_argument("--set_blas_threads", type=str2bool, default=False)

@@ -57,6 +57,7 @@ lam_c_impute_bilin = lam_c_impute if lam_c_impute is not None else 1.0
 lam_c_main_bilin   = lam_c_main   if lam_c_main   is not None else 0.1
 
 date = datetime.datetime.now().strftime('%Y-%m-%d')
+RUN_TAG = dt.now().strftime("%H%M%S_%f")
 
 RESULT_PATH = f"{MOTHER_PATH}/results/{date}/seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
 FIGURE_PATH = f"{MOTHER_PATH}/figures/{date}/seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
@@ -403,6 +404,7 @@ def bilinear_run_trial(
                 block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
                 block_tol=getattr(cfg, "block_tol", 1e-6),
                 block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
             )
         else:
             agent = BiRoLFLasso_Blockwise(
@@ -423,6 +425,7 @@ def bilinear_run_trial(
                 block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
                 block_tol=getattr(cfg, "block_tol", 1e-6),
                 block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
             )
 
     elif agent_type == "estr_lowoful":
@@ -702,7 +705,7 @@ def bilinear_run_agent(args):
         noise_std=cfg.reward_std,
         case=cfg.case,
         verbose=True,
-        fname=f"Case_{cfg.case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}",
+        fname=f"Case_{cfg.case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}",
         timing_data=local_timing_data  # Pass timing data container
     )
     
@@ -711,7 +714,7 @@ def bilinear_run_agent(args):
     # Save timing data to temporary file for this process
     agent_display_name = AGENT_DICT[agent_type]
     # Create unique filename including experiment parameters to avoid collisions
-    timing_file = f"/tmp/timing_{agent_type}_{now_trial}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_noise_{cfg.reward_std}.pkl"
+    timing_file = f"/tmp/timing_{agent_type}_{now_trial}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_noise_{cfg.reward_std}_run_{RUN_TAG}.pkl"
     timing_info = {
         'optimization_times': local_timing_data,
         'total_time': end - start,
@@ -991,7 +994,7 @@ def save_timing_data():
     T = cfg.horizon
     sigma = cfg.reward_std
     
-    timing_fname = f"timing_Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}"
+    timing_fname = f"timing_Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
     
     # Save detailed timing data
     with open(f"{RESULT_PATH}/{timing_fname}_detailed.pkl", "wb") as f:
@@ -1112,7 +1115,7 @@ if __name__ == "__main__":
 
     fig = bilinear_show_result(regrets=regret_results, horizon=T, fontsize=15)
 
-    fname = f"Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}"
+    fname = f"Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
 
     save_plot(fig, path=FIGURE_PATH, time_check = time_check, fname=fname)
     save_result(

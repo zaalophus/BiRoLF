@@ -18,7 +18,8 @@ from collections import defaultdict
 
 # Changelog (ICML26 alignment):
 # - Switched BiRoLF coupling/importance weights to single p and matched-only imputation updates.
-# - Blockwise main update keeps C_t/Gamma_t with mu=lambda_t/Gamma_t and kappa_max from max abs entry.
+# - Blockwise main update keeps mu=lambda_t/Gamma_t and kappa_max from max abs entry.
+# - Batched ou/uo block solvers reduce Python overhead while preserving the same objective.
 
 # Global timing tracking variables - will be set by main.py
 # TIMING_DATA = None
@@ -1000,6 +1001,7 @@ class BiRoLFLasso(ContextualBandit):
         self.Phi_check = np.zeros((self.M, self.N))
         self.impute_prev = np.zeros((self.M, self.N))
         self.main_prev = np.zeros((self.M, self.N))
+        self._arm_indices = np.arange(self.M * self.N)
 
     def choose(self, x: np.ndarray, y: np.ndarray):
         # x : (M, M) augmented feature matrix where each row denotes the augmented features
@@ -1030,8 +1032,6 @@ class BiRoLFLasso(ContextualBandit):
         self.j_hat = j_hat
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (self.i_hat, self.j_hat)
-        self._hat_history = getattr(self, "_hat_history", {})
-        self._hat_history[self.t] = (self.i_hat, self.j_hat)
 
         ## sampling actions (paper: sample chosen once, resample pseudo only)
         total_arms = self.M * self.N
@@ -1041,14 +1041,14 @@ class BiRoLFLasso(ContextualBandit):
 
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
-        chosen_action = np.random.choice(np.arange(total_arms), p=chosen_dist).item()
+        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
 
         pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
         pseudo_dist[chosen_action] = self.p
         pseudo_action = -1
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            pseudo_action = np.random.choice(np.arange(total_arms), p=pseudo_dist).item()
+            pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
             count += 1
 
         self.pseudo_action = pseudo_action
@@ -1724,7 +1724,8 @@ def fista_lasso_matrix(
     return X
 
 
-def fista_lasso_left_batch(
+# Batched ou solver: equivalent to independent column solves, but uses BLAS G @ X per step.
+def fista_lasso_left_batched(
     G: np.ndarray,
     B: np.ndarray,
     mu: float,
@@ -1764,7 +1765,8 @@ def fista_lasso_left_batch(
     return X
 
 
-def fista_lasso_right_batch(
+# Batched uo solver: equivalent to independent row solves, but uses BLAS X @ G per step.
+def fista_lasso_right_batched(
     G: np.ndarray,
     B: np.ndarray,
     mu: float,
@@ -1836,6 +1838,7 @@ def solve_main_blockwise(
     block_uo_max_iter = int(params.get("block_uo_max_iter", 50))
     block_tol = float(params.get("block_tol", 1e-6))
     block_use_fista = bool(params.get("block_use_fista", True))
+    block_use_batched = bool(params.get("block_use_batched", True))
 
     Mu = M - dx
     Nu = N - dy
@@ -1860,29 +1863,55 @@ def solve_main_blockwise(
 
     if dx > 0 and Nu > 0:
         Lx = 2.0 * max(lam_x_max, 1e-12)
-        Phi_hat[:dx, dy:] = fista_lasso_left_batch(
-            Gx_o,
-            B_ou,
-            mu,
-            P_ou,
-            Lx,
-            block_ou_max_iter,
-            block_tol,
-            use_fista=block_use_fista,
-        )
+        if block_use_batched:
+            Phi_hat[:dx, dy:] = fista_lasso_left_batched(
+                Gx_o,
+                B_ou,
+                mu,
+                P_ou,
+                Lx,
+                block_ou_max_iter,
+                block_tol,
+                use_fista=block_use_fista,
+            )
+        else:
+            for k in range(Nu):
+                Phi_hat[:dx, dy + k] = fista_lasso_vector(
+                    Gx_o,
+                    B_ou[:, k],
+                    mu,
+                    P_ou[:, k],
+                    Lx,
+                    block_ou_max_iter,
+                    block_tol,
+                    use_fista=block_use_fista,
+                )
 
     if Mu > 0 and dy > 0:
         Ly = 2.0 * max(lam_y_max, 1e-12)
-        Phi_hat[dx:, :dy] = fista_lasso_right_batch(
-            Gy_o,
-            B_uo,
-            mu,
-            P_uo,
-            Ly,
-            block_uo_max_iter,
-            block_tol,
-            use_fista=block_use_fista,
-        )
+        if block_use_batched:
+            Phi_hat[dx:, :dy] = fista_lasso_right_batched(
+                Gy_o,
+                B_uo,
+                mu,
+                P_uo,
+                Ly,
+                block_uo_max_iter,
+                block_tol,
+                use_fista=block_use_fista,
+            )
+        else:
+            for l in range(Mu):
+                Phi_hat[dx + l, :dy] = fista_lasso_vector(
+                    Gy_o,
+                    B_uo[l, :],
+                    mu,
+                    P_uo[l, :],
+                    Ly,
+                    block_uo_max_iter,
+                    block_tol,
+                    use_fista=block_use_fista,
+                )
 
     if dx > 0 and dy > 0:
         Loo = 2.0 * max(lam_x_max, 1e-12) * max(lam_y_max, 1e-12)
@@ -1923,6 +1952,7 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         block_uo_max_iter: int = 50,
         block_tol: float = 1e-6,
         block_use_fista: bool = True,
+        block_use_batched: bool = True,
     ):
         super().__init__(
             M=M,
@@ -1948,8 +1978,10 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         self.block_uo_max_iter = block_uo_max_iter
         self.block_tol = block_tol
         self.block_use_fista = block_use_fista
+        self.block_use_batched = block_use_batched
 
         self.Gamma = 0
+        self._store_C = False
         self.C = np.zeros((self.M, self.N), dtype=float)
         self.B = np.zeros((self.M, self.N), dtype=float)
         self.G_Xo = None
@@ -1983,6 +2015,7 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
             self.G_Yo = np.zeros((0, 0), dtype=float)
             self.lam_y_max = 0.0
 
+        # Paper: kappa_max is max absolute entry in augmented features.
         self.kappa_x = float(np.max(np.abs(x))) if x.size else 0.0
         self.kappa_y = float(np.max(np.abs(y))) if y.size else 0.0
         self._block_caches_ready = True
@@ -2045,13 +2078,18 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         S_uo = T_uo + alpha * O_uo
         S_uu = T_uu + alpha * O_uu
 
-        # Online averages for B_t = C_t / Gamma.
+        # Online averages for B_t without full-matrix division.
         self.Gamma += 1
-        self.C[:dx, :dy] += S_oo
-        self.C[:dx, dy:] += S_ou
-        self.C[dx:, :dy] += S_uo
-        self.C[dx:, dy:] += S_uu
-        self.B = self.C / float(self.Gamma)
+        inv_gamma = 1.0 / float(self.Gamma)
+        self.B[:dx, :dy] += (S_oo - self.B[:dx, :dy]) * inv_gamma
+        self.B[:dx, dy:] += (S_ou - self.B[:dx, dy:]) * inv_gamma
+        self.B[dx:, :dy] += (S_uo - self.B[dx:, :dy]) * inv_gamma
+        self.B[dx:, dy:] += (S_uu - self.B[dx:, dy:]) * inv_gamma
+        if self._store_C:
+            self.C[:dx, :dy] += S_oo
+            self.C[:dx, dy:] += S_ou
+            self.C[dx:, :dy] += S_uo
+            self.C[dx:, dy:] += S_uu
 
         mu = lam_main / float(self.Gamma)
         optimization_start_time = time.time()
@@ -2069,6 +2107,7 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
                 "block_uo_max_iter": self.block_uo_max_iter,
                 "block_tol": self.block_tol,
                 "block_use_fista": self.block_use_fista,
+                "block_use_batched": self.block_use_batched,
             },
             lam_x_max=self.lam_x_max,
             lam_y_max=self.lam_y_max,
