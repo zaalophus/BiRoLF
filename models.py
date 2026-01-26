@@ -289,6 +289,7 @@ class LinUCB(ContextualBandit):
         self.theta_hat = np.zeros(d)
         self.delta = delta
         self.t = 0
+        self._alpha_base = linucb_alpha(delta=self.delta)
 
     def choose(self, x: np.ndarray) -> int:
         # x: action set at each round (N, d)
@@ -298,14 +299,15 @@ class LinUCB(ContextualBandit):
         self.theta_hat = self.Vinv @ self.xty
 
         ## compute the ucb scores for each arm
-        alpha = linucb_alpha(delta=self.delta) * np.sqrt(np.log(self.t))
+        alpha = self._alpha_base * np.sqrt(np.log(self.t))
         expected = x @ self.theta_hat  # (N, ) theta_T @ x_t
-        width = np.sqrt(np.einsum("Ni, ij, Nj -> N", x, self.Vinv, x))  # (N, ) widths
+        xV = x @ self.Vinv
+        width = np.sqrt(np.sum(xV * x, axis=1))  # (N, ) widths
         ucb_scores = expected + (alpha * width)  # (N, ) ucb score
 
         ## chose the argmax the ucb score
         maximum = np.max(ucb_scores)
-        (argmax,) = np.where(ucb_scores == maximum)
+        argmax = np.flatnonzero(ucb_scores == maximum)
         self.chosen_action = np.random.choice(argmax)
         return self.chosen_action
 
@@ -331,6 +333,7 @@ class LinTS(ContextualBandit):
         self.reward_std = reward_std
         self.delta = delta
         self.t = 0
+        self._alpha_base = lints_alpha(d=self.d, reward_std=self.reward_std, delta=self.delta)
 
     def choose(self, x: np.ndarray) -> int:
         # x: action set at each round (N, d)
@@ -342,15 +345,20 @@ class LinTS(ContextualBandit):
         ## parameter sampling
         # self.alpha_ = self.alpha * np.sqrt(np.log(self.t))
         # alpha = lints_alpha(d=self.d, horizon=self.horizon, reward_std=self.reward_std, delta=self.delta) * np.sqrt(np.log(self.t))
-        alpha = lints_alpha(d=self.d, reward_std=self.reward_std, delta=self.delta)
-        tilde_theta = np.random.multivariate_normal(
-            mean=self.theta_hat, cov=(alpha**2) * self.Binv
-        )  # (d, ) random matrix
+        alpha = self._alpha_base
+        try:
+            L = np.linalg.cholesky(self.Binv)
+            z = np.random.randn(self.d)
+            tilde_theta = self.theta_hat + alpha * (L @ z)
+        except np.linalg.LinAlgError:
+            tilde_theta = np.random.multivariate_normal(
+                mean=self.theta_hat, cov=(alpha**2) * self.Binv
+            )
 
         ## compute estimates and choose the argmax
         expected = x @ tilde_theta  # (N, ) vector
         maximum = np.max(expected)
-        (argmax,) = np.where(expected == maximum)
+        argmax = np.flatnonzero(expected == maximum)
         self.chosen_action = np.random.choice(argmax)
         return self.chosen_action
 
@@ -402,6 +410,7 @@ class RoLFLasso(ContextualBandit):
         self.fista_tol = 1e-6
         self._arm_indices = np.arange(self.K)
         self._static_arms_initialized = False
+        self._profile_ops = False
         self.X_static = None
         self.G_main_base = None
         self.lam_main_max = None
@@ -447,7 +456,7 @@ class RoLFLasso(ContextualBandit):
         self._ahat_history = getattr(self, "_ahat_history", {})
         self._ahat_history[self.t] = a_hat
 
-        ## sampling actions (paper coupling: pseudo is conditional on chosen)
+        ## sampling actions (resample chosen and pseudo until match or max_iter)
         denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
         max_iter = int(
             np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
@@ -456,10 +465,11 @@ class RoLFLasso(ContextualBandit):
         chosen_dist = np.full(self.K, (1.0 / np.sqrt(self.t)) / max(self.K - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
+        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
             pseudo_dist = np.full(self.K, (1.0 - self.p) / max(self.K - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
@@ -471,6 +481,10 @@ class RoLFLasso(ContextualBandit):
     def update(self, x: np.ndarray, r: float):
         # x : (K, K) augmented feature matrix
         # r : reward of the chosen_action
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
         if self.pseudo_action != self.chosen_action:
             self.matching[self.t] = (
                 (self.pseudo_action == self.chosen_action),
@@ -501,6 +515,8 @@ class RoLFLasso(ContextualBandit):
         self.G_imp += np.outer(chosen_context, chosen_context)
         self.b_imp += r * chosen_context
         L_imp = 2.0 * max(float(np.max(np.linalg.eigvalsh(self.G_imp))), 1e-12)
+        impute_stats = {} if getattr(self, "_profile_ops", False) else None
+        impute_start = time.perf_counter()
         mu_impute = fista_lasso_vector(
             self.G_imp,
             self.b_imp,
@@ -510,7 +526,11 @@ class RoLFLasso(ContextualBandit):
             self.fista_max_iter,
             self.fista_tol,
             use_fista=True,
+            stats=impute_stats,
         )
+        self._last_impute_time = time.perf_counter() - impute_start
+        if impute_stats is not None:
+            self._last_impute_iters = int(impute_stats.get("iters", 0))
 
         ## compute the pseudo rewards for the current data
         # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
@@ -520,8 +540,8 @@ class RoLFLasso(ContextualBandit):
         )
         self.matching[self.t] = (
             (self.pseudo_action == self.chosen_action),
-            x,
-            pseudo_rewards,
+            None,
+            None,
             self.chosen_action,
             r,
         )
@@ -539,7 +559,8 @@ class RoLFLasso(ContextualBandit):
         )
         G_main = self.G_main_base * float(self.Gamma_main)
         L_main = 2.0 * max(self.lam_main_max, 1e-12) * float(self.Gamma_main)
-        optimization_start_time = time.time()
+        main_stats = {} if getattr(self, "_profile_ops", False) else None
+        optimization_start_time = time.perf_counter()
         mu_main = fista_lasso_vector(
             G_main,
             self.b_main,
@@ -549,13 +570,18 @@ class RoLFLasso(ContextualBandit):
             self.fista_max_iter,
             self.fista_tol,
             use_fista=True,
+            stats=main_stats,
         )
-        optimization_time = time.time() - optimization_start_time
+        optimization_time = time.perf_counter() - optimization_start_time
+        self._last_main_time = optimization_time
+        if main_stats is not None:
+            self._last_main_iters = int(main_stats.get("iters", 0))
 
-        if hasattr(self, "_timing_data") and self._timing_data is not None:
+        if not getattr(self, "_benchmark_mode", False) and hasattr(self, "_timing_data") and self._timing_data is not None:
             agent = self.__class__.__name__
             trial = getattr(self, "_trial", 0)
-            self._timing_data.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
+            timing_store = self._timing_data.get("optimization", self._timing_data)
+            timing_store.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
 
         ## update the mu_hat
         self.mu_hat = mu_main
@@ -650,6 +676,7 @@ class RoLFRidge(ContextualBandit):
         self.sum_pseudo = np.zeros(self.K)
         self.gamma = 0
         self._arm_indices = np.arange(self.K)
+        self._profile_ops = False
 
     def _init_main_cache(self, x: np.ndarray) -> None:
         if self._static_arms_initialized:
@@ -681,7 +708,7 @@ class RoLFRidge(ContextualBandit):
         self._ahat_history = getattr(self, "_ahat_history", {})
         self._ahat_history[self.t] = a_hat
 
-        ## sampling actions (fixed chosen; resample pseudo only up to rho_t)
+        ## sampling actions (resample chosen and pseudo until match or max_iter)
         denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
         max_iter = int(
             np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
@@ -691,10 +718,11 @@ class RoLFRidge(ContextualBandit):
         )
         chosen_dist[a_hat] = 1 - (1 / np.sqrt(self.t))
 
-        chosen_action = np.random.choice(self._arm_indices, size=1, replace=False, p=chosen_dist).item()
         pseudo_action = -1
+        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(self._arm_indices, size=1, replace=False, p=chosen_dist).item()
             pseudo_dist = np.array([(1 - self.p) / (self.K - 1)] * self.K, dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, size=1, replace=False, p=pseudo_dist).item()
@@ -708,13 +736,19 @@ class RoLFRidge(ContextualBandit):
     def update(self, x: np.ndarray, r: float):
         # x : (K, K) augmented feature matrix
         # r : reward of the chosen_action
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
         if self.pseudo_action == self.chosen_action:
             self._init_main_cache(x)
             ## compute the imputation estimator based on history
+            impute_start = time.perf_counter()
             chosen_context = x[self.chosen_action, :]
             self.Vinv_impute = shermanMorrison(self.Vinv_impute, chosen_context)
             self.xty_impute += r * chosen_context
             mu_impute = self.Vinv_impute @ self.xty_impute
+            self._last_impute_time = time.perf_counter() - impute_start
 
             ## compute the pseudo rewards for the current data
             pseudo_rewards = x @ mu_impute
@@ -723,8 +757,8 @@ class RoLFRidge(ContextualBandit):
             )
             self.matching[self.t] = (
                 (self.pseudo_action == self.chosen_action),
-                x,
-                pseudo_rewards,
+                None,
+                None,
                 self.chosen_action,
                 r,
             )
@@ -732,9 +766,11 @@ class RoLFRidge(ContextualBandit):
             self.gamma += 1
 
             ## compute the main estimator using cached eigendecomposition
+            main_start = time.perf_counter()
             b_main = self.X_static.T @ self.sum_pseudo
             denom = 1.0 + self.gamma * self.G_eigvals
             mu_main = self.G_eigvecs @ ((self.G_eigvecs.T @ b_main) / denom)
+            self._last_main_time = time.perf_counter() - main_start
 
             ## update the mu_hat
             self.mu_hat = mu_main
@@ -811,6 +847,16 @@ class DRLassoBandit(ContextualBandit):
         self.x = []  # containing context history
         self.r = []  # containing reward history
         self.t = 0  # learning round
+        # FISTA-based lasso update (fast)
+        self.fista_max_iter = 200
+        self.fista_tol = 1e-6
+        self.G = np.zeros((self.d, self.d), dtype=float)
+        self.b = np.zeros(self.d, dtype=float)
+        self.G_trace = 0.0
+        self._last_bar_x = None
+        self._last_main_time = 0.0
+        self._last_main_iters = 0
+        self._profile_ops = False
 
     def choose(self, x):
         ## x : (K, d) array - all contexts observed at t
@@ -836,6 +882,7 @@ class DRLassoBandit(ContextualBandit):
 
         bar_x = np.mean(x, axis=0)
         self.x.append(bar_x)
+        self._last_bar_x = bar_x
         self.rhat = x @ self.beta_hat
 
         return self.action
@@ -843,6 +890,8 @@ class DRLassoBandit(ContextualBandit):
     def update(self, x, r):
         ## x : (K, d) array - context of the all actions in round t
         ## r : float - reward
+        self._last_main_time = 0.0
+        self._last_main_iters = 0
         r_hat = np.mean(self.rhat) + (
             (r - (x[self.action] @ self.beta_hat)) / (self.arms * self.pi_t)
         )
@@ -851,14 +900,33 @@ class DRLassoBandit(ContextualBandit):
         self.r.append(r_hat)
 
         lam2 = self.lam2 * np.sqrt((np.log(self.t) + np.log(self.d)) / self.t)
-        data, target = np.vstack(self.x), np.array(self.r)
-        self.beta_hat = scipy.optimize.minimize(
-            self.__lasso_loss,
+        # FISTA on quadratic form: min beta^T G beta - 2 b^T beta + lam ||beta||_1
+        if self._last_bar_x is None:
+            bar_x = np.mean(x, axis=0)
+        else:
+            bar_x = self._last_bar_x
+        self.G += np.outer(bar_x, bar_x)
+        self.G_trace += float(bar_x @ bar_x)
+        self.b += r_hat * bar_x
+
+        L = 2.0 * max(self.G_trace, 1e-12)  # safe Lipschitz upper bound
+        stats = {} if getattr(self, "_profile_ops", False) else None
+        start = time.perf_counter()
+        self.beta_hat = fista_lasso_vector(
+            self.G,
+            self.b,
+            lam2,
             self.beta_prev,
-            args=(data, target, lam2),
-            method="SLSQP",
-            options={"disp": False, "ftol": 1e-6, "maxiter": 30000},
-        ).x
+            L,
+            self.fista_max_iter,
+            self.fista_tol,
+            use_fista=True,
+            stats=stats,
+        )
+        self._last_main_time = time.perf_counter() - start
+        if stats is not None:
+            self._last_main_iters = int(stats.get("iters", 0))
+        self.beta_prev = self.beta_hat
 
     def __lasso_loss(self, beta: np.ndarray, X: np.ndarray, y: np.ndarray, lam: float):
         loss = np.sum((y - X @ beta) ** 2, axis=0)
@@ -977,7 +1045,7 @@ class LassoBandit(ContextualBandit):
         return loss + (lam * l1norm)
 
 
-class BiRoLFLasso(ContextualBandit):
+class BiRoLFLasso_old(ContextualBandit):
     def __init__(
         self,
         M: int,
@@ -1025,6 +1093,7 @@ class BiRoLFLasso(ContextualBandit):
         self.impute_prev = np.zeros((self.M, self.N))
         self.main_prev = np.zeros((self.M, self.N))
         self._arm_indices = np.arange(self.M * self.N)
+        self._profile_ops = False
 
     def choose(self, x: np.ndarray, y: np.ndarray):
         # x : (M, M) augmented feature matrix where each row denotes the augmented features
@@ -1056,7 +1125,7 @@ class BiRoLFLasso(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (self.i_hat, self.j_hat)
 
-        ## sampling actions (fixed chosen; resample pseudo only up to rho_t)
+        ## sampling actions (resample chosen and pseudo until match or max_iter)
         total_arms = self.M * self.N
         denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
         max_iter = int(
@@ -1066,10 +1135,11 @@ class BiRoLFLasso(ContextualBandit):
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
+        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
             pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
@@ -1083,6 +1153,10 @@ class BiRoLFLasso(ContextualBandit):
         # x : (M, M) augmented feature matrix
         # y : (N, N) augmented feature matrix
         # r : reward of the chosen_action
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
         if self.pseudo_action == self.chosen_action:
             chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
             self.action_i_history.append(chosen_i)
@@ -1119,6 +1193,7 @@ class BiRoLFLasso(ContextualBandit):
             # print(f"impute_prev : {self.impute_prev.shape}")
 
             impute_shape = self.impute_prev.shape
+            impute_start_time = time.perf_counter()
             Phi_impute = scipy.optimize.minimize(
                 self.__imputation_loss,
                 self.impute_prev.reshape(-1),
@@ -1126,6 +1201,7 @@ class BiRoLFLasso(ContextualBandit):
                 method="SLSQP",
                 options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
             ).x.reshape(impute_shape)
+            self._last_impute_time = time.perf_counter() - impute_start_time
 
             ## compute the pseudo rewards for the current data
             pseudo_rewards = x @ Phi_impute @ y.T
@@ -1146,8 +1222,8 @@ class BiRoLFLasso(ContextualBandit):
 
             ## compute the main estimator
             
-            # Time the lasso optimization for BiRoLFLasso
-            optimization_start_time = time.time()
+            # Time the lasso optimization for BiRoLFLasso_old
+            optimization_start_time = time.perf_counter()
             
             main_prev_shape = self.main_prev.shape
             Phi_main = scipy.optimize.minimize(
@@ -1158,21 +1234,23 @@ class BiRoLFLasso(ContextualBandit):
                 options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
             ).x.reshape(main_prev_shape)
             
-            optimization_end_time = time.time()
+            optimization_end_time = time.perf_counter()
             optimization_time = optimization_end_time - optimization_start_time
+            self._last_main_time = optimization_time
             
             # Record timing data for ablation study
-            if hasattr(self, '_timing_data') and self._timing_data is not None:
+            if not getattr(self, "_benchmark_mode", False) and hasattr(self, '_timing_data') and self._timing_data is not None:
                 agent_name = self.__class__.__name__
                 trial = getattr(self, '_trial', 0)
-                
+                timing_store = self._timing_data.get("optimization", self._timing_data)
+
                 # Initialize nested dict structure if needed
-                if agent_name not in self._timing_data:
-                    self._timing_data[agent_name] = {}
-                if trial not in self._timing_data[agent_name]:
-                    self._timing_data[agent_name][trial] = []
-                    
-                self._timing_data[agent_name][trial].append(optimization_time)
+                if agent_name not in timing_store:
+                    timing_store[agent_name] = {}
+                if trial not in timing_store[agent_name]:
+                    timing_store[agent_name][trial] = []
+
+                timing_store[agent_name][trial].append(optimization_time)
 
             ## update the Phi_hat
             self.Phi_hat = Phi_main
@@ -1254,7 +1332,7 @@ class BiRoLFLasso(ContextualBandit):
     def __get_param(self):
         return {"param": self.Phi_hat, "impute": self.Phi_check}
 
-class BiRoLFLasso_FISTA(ContextualBandit):
+class BiRoLFLasso(ContextualBandit):
     def __init__(
         self,
         M: int,
@@ -1303,14 +1381,11 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self._static_arms_initialized = False
         self.X_static = None   # (M, d_x)
         self.Y_static = None   # (N, d_y)
-        self.A_i = None        # list of (d_x,d_x)
-        self.B_j = None        # list of (d_y,d_y)
 
         # aggregates for impute objective
         self.Ncnt = np.zeros((self.M, self.N), dtype=int)
         self.Ssum = np.zeros((self.M, self.N), dtype=float)
         self.Ssq  = np.zeros((self.M, self.N), dtype=float)
-        self.Bbar_i = None     # list of (d_y,d_y)
         self.C_sum = np.zeros((self.M, self.N), dtype=float)
 
         # main-stage caches for fast full-matrix FISTA
@@ -1321,16 +1396,13 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self.B_main_sum = np.zeros((self.M, self.N), dtype=float)
         self.Gamma_main = 0
         self._last_lam_main = None
-        self.impute_use_backtracking = False
-        self.x_norm2 = None
-        self.y_norm2 = None
-        self.Bbar_fro2 = None
-        self._L_imp_sum = 0.0
+        self.impute_use_backtracking = True
 
         # FISTA hyper-params
         self.fista_max_iter = 200
         self.fista_tol = 1e-6
         self._arm_indices = np.arange(self.M * self.N)
+        self._profile_ops = False
 
     # ---------- utilities ----------
     @staticmethod
@@ -1372,13 +1444,6 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             return
         self.X_static = x.copy()
         self.Y_static = y.copy()
-        self.A_i = [np.outer(self.X_static[i, :], self.X_static[i, :]) for i in range(self.M)]
-        self.B_j = [np.outer(self.Y_static[j, :], self.Y_static[j, :]) for j in range(self.N)]
-        self.Bbar_i = [np.zeros((self.Y_static.shape[1], self.Y_static.shape[1])) for _ in range(self.M)]
-        self.x_norm2 = np.sum(self.X_static * self.X_static, axis=1)
-        self.y_norm2 = np.sum(self.Y_static * self.Y_static, axis=1)
-        self.Bbar_fro2 = np.zeros(self.M, dtype=float)
-        self._L_imp_sum = 0.0
         # Precompute Gram matrices for the main objective.
         self.Gx = self.X_static.T @ self.X_static
         self.Gy = self.Y_static.T @ self.Y_static
@@ -1390,17 +1455,6 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self.Ncnt[i, j] += 1
         self.Ssum[i, j] += r
         self.Ssq[i, j]  += r * r
-        if self.Bbar_fro2 is not None and self.x_norm2 is not None and self.y_norm2 is not None:
-            y = self.Y_static[j, :]
-            old_norm = np.sqrt(self.Bbar_fro2[i])
-            dot = float(y @ (self.Bbar_i[i] @ y))
-            self.Bbar_fro2[i] = max(
-                self.Bbar_fro2[i] + 2.0 * dot + (self.y_norm2[j] ** 2),
-                0.0,
-            )
-            new_norm = np.sqrt(self.Bbar_fro2[i])
-            self._L_imp_sum += self.x_norm2[i] * (new_norm - old_norm)
-        self.Bbar_i[i] += self.B_j[j]
         self.C_sum += np.outer(self.X_static[i, :], self.Y_static[j, :]) * r
 
     # ---- impute smooth part: g_imp(Φ) and ∇g_imp(Φ) ----
@@ -1414,20 +1468,18 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         return term1 + term2 + const
 
     def _grad_impute(self, Phi: np.ndarray) -> np.ndarray:
-        G = -2.0 * self.C_sum
-        for i in range(self.M):
-            G += 2.0 * (self.A_i[i] @ Phi @ self.Bbar_i[i])
-        return G
+        if self.X_static is None or self.Y_static is None:
+            return np.zeros_like(Phi)
+        S = self.X_static @ Phi @ self.Y_static.T
+        Z = self.Ncnt * S
+        return 2.0 * (self.X_static.T @ Z @ self.Y_static) - 2.0 * self.C_sum
 
     def _impute_lipschitz_upper(self) -> float:
-        if self._L_imp_sum is not None:
-            return 2.0 * max(float(self._L_imp_sum), 1e-12)
-        total = 0.0
-        for i in range(self.M):
-            LA = self._spectral_norm(self.A_i[i])
-            LB = self._spectral_norm(self.Bbar_i[i]) if np.any(self.Bbar_i[i]) else 0.0
-            total += LA * LB
-        return 2.0 * max(total, 1e-12)
+        max_n = float(np.max(self.Ncnt)) if self.Ncnt.size else 0.0
+        lam_x = max(float(self.lam_x_max or 0.0), 1e-12)
+        lam_y = max(float(self.lam_y_max or 0.0), 1e-12)
+        L = 2.0 * max_n * lam_x * lam_y
+        return max(L, 1e-12)
 
     # ---- single, correct FISTA with backtracking (g = smooth only) ----
     def _fista_l1_backtracking(
@@ -1441,6 +1493,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         max_iter: int = None,
         tol: float = None,
         max_backtrack: int = 50,
+        stats: Dict[str, float] = None,
     ) -> np.ndarray:
         if max_iter is None:
             max_iter = self.fista_max_iter
@@ -1452,7 +1505,11 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         Y = Phi0.copy()
         t_par = 1.0
 
+        iters = 0
+        total_backtracks = 0
+        converged = False
         for _ in range(max_iter):
+            iters += 1
             G = grad_fn(Y)
             if not np.all(np.isfinite(G)):
                 break
@@ -1472,6 +1529,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
                 if bt >= max_backtrack:
                     # 안전장치: 너무 보수적인 L로 수렴이 굼뜨는 경우 루프 탈출
                     break
+            total_backtracks += bt
 
             t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_par * t_par))
             Y_next = Phi_try + ((t_par - 1.0) / t_next) * (Phi_try - Phi)
@@ -1481,11 +1539,25 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             nphi  = np.linalg.norm(Phi,     ord='fro')
             Phi, Y, t_par = Phi_try, Y_next, t_next
             if ndiff <= (tol * max(1.0, nphi)):
+                converged = True
                 break
+        if stats is not None:
+            stats["iters"] = iters
+            stats["converged"] = converged
+            stats["backtracks"] = total_backtracks
         return Phi
 
     # (옵션) plain FISTA는 남겨둠 — 사용하지 않아도 무방
-    def _fista_l1(self, Phi0: np.ndarray, lam: float, grad_fn, L_bound: float, max_iter: int = None, tol: float = None) -> np.ndarray:
+    def _fista_l1(
+        self,
+        Phi0: np.ndarray,
+        lam: float,
+        grad_fn,
+        L_bound: float,
+        max_iter: int = None,
+        tol: float = None,
+        stats: Dict[str, float] = None,
+    ) -> np.ndarray:
         if max_iter is None:
             max_iter = self.fista_max_iter
         if tol is None:
@@ -1495,7 +1567,10 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         Y = Phi0.copy()
         Phi = Phi0.copy()
         t_par = 1.0
+        iters = 0
+        converged = False
         for _ in range(max_iter):
+            iters += 1
             G = grad_fn(Y)
             if np.any(np.isnan(G)) or np.any(np.isinf(G)):
                 break
@@ -1506,9 +1581,13 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             nphi  = np.linalg.norm(Phi,     ord='fro')
             if ndiff <= tol * max(1.0, nphi):
                 Phi = Phi_next
+                converged = True
                 break
             Phi = Phi_next
             t_par = t_next
+        if stats is not None:
+            stats["iters"] = iters
+            stats["converged"] = converged
         return Phi
 
     # ---------- policy ----------
@@ -1531,7 +1610,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (i_hat, j_hat)
 
-        # pseudo / chosen sampling (fixed chosen; resample pseudo only up to rho_t)
+        # pseudo / chosen sampling (resample chosen and pseudo until match or max_iter)
         total_arms = self.M * self.N
         denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
         max_iter = int(
@@ -1541,10 +1620,11 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
+        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
+            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
             pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
@@ -1557,6 +1637,10 @@ class BiRoLFLasso_FISTA(ContextualBandit):
 
     def update(self, x: np.ndarray, y: np.ndarray, r: float):
         self._init_static_arms_if_needed(x, y)
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
 
         ci, cj = action_to_ij(self.chosen_action, self.N)
 
@@ -1578,14 +1662,28 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             self._update_impute_caches(ci, cj, r)
             # ---- imputation: backtracking FISTA on smooth g_imp + l1 ----
             L_imp = self._impute_lipschitz_upper()
+            impute_stats = {} if getattr(self, "_profile_ops", False) else None
+            impute_start = time.perf_counter()
             if self.impute_use_backtracking:
                 Phi_impute = self._fista_l1_backtracking(
-                    self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
+                    self.impute_prev,
+                    lam_impute,
+                    self._grad_impute,
+                    self._g_impute,
+                    L_imp,
+                    stats=impute_stats,
                 )
             else:
                 Phi_impute = self._fista_l1(
-                    self.impute_prev, lam_impute, self._grad_impute, L_imp
+                    self.impute_prev,
+                    lam_impute,
+                    self._grad_impute,
+                    L_imp,
+                    stats=impute_stats,
                 )
+            self._last_impute_time = time.perf_counter() - impute_start
+            if impute_stats is not None:
+                self._last_impute_iters = int(impute_stats.get("iters", 0))
 
             # current round pseudo-reward contribution to main sufficient stats
             pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
@@ -1598,7 +1696,8 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             Gx_scaled = self.Gx * float(self.Gamma_main)
             B_main = self.B_main_sum
             L_main = 2.0 * max(self.lam_x_max, 1e-12) * max(self.lam_y_max, 1e-12) * float(self.Gamma_main)
-            optimization_start_time = time.time()
+            main_stats = {} if getattr(self, "_profile_ops", False) else None
+            optimization_start_time = time.perf_counter()
             Phi_main = fista_lasso_matrix(
                 Gx_scaled,
                 self.Gy,
@@ -1609,13 +1708,18 @@ class BiRoLFLasso_FISTA(ContextualBandit):
                 self.fista_max_iter,
                 self.fista_tol,
                 use_fista=True,
+                stats=main_stats,
             )
-            optimization_time = time.time() - optimization_start_time
+            optimization_time = time.perf_counter() - optimization_start_time
+            self._last_main_time = optimization_time
+            if main_stats is not None:
+                self._last_main_iters = int(main_stats.get("iters", 0))
 
-            if hasattr(self, '_timing_data') and self._timing_data is not None:
+            if not getattr(self, "_benchmark_mode", False) and hasattr(self, '_timing_data') and self._timing_data is not None:
                 agent = self.__class__.__name__
                 trial = getattr(self, '_trial', 0)
-                self._timing_data.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
+                timing_store = self._timing_data.get("optimization", self._timing_data)
+                timing_store.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
 
             # update params / warm-starts
             self.Phi_hat = Phi_main
@@ -1671,6 +1775,7 @@ def fista_lasso_vector(
     max_iter: int,
     tol: float,
     use_fista: bool = True,
+    stats: Dict[str, float] = None,
 ) -> np.ndarray:
     assert G.shape[0] == G.shape[1]
     d = G.shape[0]
@@ -1688,7 +1793,10 @@ def fista_lasso_vector(
     L = max(float(L), 1e-12)
     y = x.copy()
     t_par = 1.0
+    iters = 0
+    converged = False
     for _ in range(max_iter):
+        iters += 1
         grad = 2.0 * (G @ y) - 2.0 * b
         x_next = soft_threshold(y - grad / L, mu / L)
         if use_fista:
@@ -1701,7 +1809,11 @@ def fista_lasso_vector(
         nrm = np.linalg.norm(x)
         x = x_next
         if ndiff <= tol * max(1.0, nrm):
+            converged = True
             break
+    if stats is not None:
+        stats["iters"] = iters
+        stats["converged"] = converged
     return x
 
 
@@ -1715,6 +1827,7 @@ def fista_lasso_matrix(
     max_iter: int,
     tol: float,
     use_fista: bool = True,
+    stats: Dict[str, float] = None,
 ) -> np.ndarray:
     assert Gx.shape[0] == Gx.shape[1]
     assert Gy.shape[0] == Gy.shape[1]
@@ -1733,7 +1846,10 @@ def fista_lasso_matrix(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
+    iters = 0
+    converged = False
     for _ in range(max_iter):
+        iters += 1
         grad = 2.0 * (Gx @ Y @ Gy) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1746,7 +1862,11 @@ def fista_lasso_matrix(
         nrm = np.linalg.norm(X, ord="fro")
         X = X_next
         if ndiff <= tol * max(1.0, nrm):
+            converged = True
             break
+    if stats is not None:
+        stats["iters"] = iters
+        stats["converged"] = converged
     return X
 
 
@@ -1785,6 +1905,7 @@ def fista_lasso_left_batched(
     max_iter: int,
     tol: float,
     use_fista: bool = True,
+    stats: Dict[str, float] = None,
 ) -> np.ndarray:
     assert G.shape[0] == G.shape[1]
     if X0 is None:
@@ -1799,7 +1920,10 @@ def fista_lasso_left_batched(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
+    iters = 0
+    converged = False
     for _ in range(max_iter):
+        iters += 1
         grad = 2.0 * (G @ Y) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1812,7 +1936,11 @@ def fista_lasso_left_batched(
         nrm = np.linalg.norm(X, ord="fro")
         X = X_next
         if ndiff <= tol * max(1.0, nrm):
+            converged = True
             break
+    if stats is not None:
+        stats["iters"] = iters
+        stats["converged"] = converged
     return X
 
 
@@ -1826,6 +1954,7 @@ def fista_lasso_right_batched(
     max_iter: int,
     tol: float,
     use_fista: bool = True,
+    stats: Dict[str, float] = None,
 ) -> np.ndarray:
     assert G.shape[0] == G.shape[1]
     if X0 is None:
@@ -1840,7 +1969,10 @@ def fista_lasso_right_batched(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
+    iters = 0
+    converged = False
     for _ in range(max_iter):
+        iters += 1
         grad = 2.0 * (Y @ G) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1853,8 +1985,44 @@ def fista_lasso_right_batched(
         nrm = np.linalg.norm(X, ord="fro")
         X = X_next
         if ndiff <= tol * max(1.0, nrm):
+            converged = True
             break
+    if stats is not None:
+        stats["iters"] = iters
+        stats["converged"] = converged
     return X
+
+
+def build_augmented_gram(G_obs: np.ndarray, size: int, d_obs: int) -> np.ndarray:
+    assert 0 <= d_obs <= size
+    G = np.eye(size, dtype=float)
+    if d_obs > 0:
+        G[:d_obs, :d_obs] = G_obs
+    return G
+
+
+def main_objective(Phi: np.ndarray, Gx: np.ndarray, Gy: np.ndarray, B: np.ndarray, mu: float) -> float:
+    assert Phi.shape == B.shape
+    if Phi.size == 0:
+        return 0.0
+    smooth = float(np.trace(Phi.T @ Gx @ Phi @ Gy) - 2.0 * np.trace(B.T @ Phi))
+    l1 = float(mu) * float(np.sum(np.abs(Phi)))
+    return smooth + l1
+
+
+def main_objective_blockwise(
+    Phi: np.ndarray,
+    B: np.ndarray,
+    Gx_o: np.ndarray,
+    Gy_o: np.ndarray,
+    dx: int,
+    dy: int,
+    mu: float,
+) -> float:
+    M, N = B.shape
+    Gx = build_augmented_gram(Gx_o, M, dx)
+    Gy = build_augmented_gram(Gy_o, N, dy)
+    return main_objective(Phi, Gx, Gy, B, mu)
 
 
 def solve_main_blockwise(
@@ -1868,6 +2036,7 @@ def solve_main_blockwise(
     params: Dict[str, float] = None,
     lam_x_max: float = None,
     lam_y_max: float = None,
+    stats: Dict[str, float] = None,
 ) -> np.ndarray:
     assert B.ndim == 2
     M, N = B.shape
@@ -1914,6 +2083,7 @@ def solve_main_blockwise(
 
     if dx > 0 and Nu > 0:
         Lx = 2.0 * max(lam_x_max, 1e-12)
+        ou_stats = {} if stats is not None else None
         if block_use_batched:
             Phi_hat[:dx, dy:] = fista_lasso_left_batched(
                 Gx_o,
@@ -1924,9 +2094,12 @@ def solve_main_blockwise(
                 block_ou_max_iter,
                 block_tol,
                 use_fista=block_use_fista,
+                stats=ou_stats,
             )
         else:
+            ou_iters_total = 0
             for k in range(Nu):
+                col_stats = {} if stats is not None else None
                 Phi_hat[:dx, dy + k] = fista_lasso_vector(
                     Gx_o,
                     B_ou[:, k],
@@ -1936,10 +2109,18 @@ def solve_main_blockwise(
                     block_ou_max_iter,
                     block_tol,
                     use_fista=block_use_fista,
+                    stats=col_stats,
                 )
+                if col_stats is not None:
+                    ou_iters_total += int(col_stats.get("iters", 0))
+            if stats is not None:
+                stats["ou_iters"] = ou_iters_total
+        if stats is not None and ou_stats is not None and "ou_iters" not in stats:
+            stats["ou_iters"] = ou_stats.get("iters", 0)
 
     if Mu > 0 and dy > 0:
         Ly = 2.0 * max(lam_y_max, 1e-12)
+        uo_stats = {} if stats is not None else None
         if block_use_batched:
             Phi_hat[dx:, :dy] = fista_lasso_right_batched(
                 Gy_o,
@@ -1950,9 +2131,12 @@ def solve_main_blockwise(
                 block_uo_max_iter,
                 block_tol,
                 use_fista=block_use_fista,
+                stats=uo_stats,
             )
         else:
+            uo_iters_total = 0
             for l in range(Mu):
+                row_stats = {} if stats is not None else None
                 Phi_hat[dx + l, :dy] = fista_lasso_vector(
                     Gy_o,
                     B_uo[l, :],
@@ -1962,10 +2146,18 @@ def solve_main_blockwise(
                     block_uo_max_iter,
                     block_tol,
                     use_fista=block_use_fista,
+                    stats=row_stats,
                 )
+                if row_stats is not None:
+                    uo_iters_total += int(row_stats.get("iters", 0))
+            if stats is not None:
+                stats["uo_iters"] = uo_iters_total
+        if stats is not None and uo_stats is not None and "uo_iters" not in stats:
+            stats["uo_iters"] = uo_stats.get("iters", 0)
 
     if dx > 0 and dy > 0:
         Loo = 2.0 * max(lam_x_max, 1e-12) * max(lam_y_max, 1e-12)
+        oo_stats = {} if stats is not None else None
         Phi_hat[:dx, :dy] = fista_lasso_matrix(
             Gx_o,
             Gy_o,
@@ -1976,12 +2168,17 @@ def solve_main_blockwise(
             block_oo_max_iter,
             block_tol,
             use_fista=block_use_fista,
+            stats=oo_stats,
         )
+        if stats is not None and oo_stats is not None:
+            stats["oo_iters"] = oo_stats.get("iters", 0)
 
+    if stats is not None:
+        stats["total_iters"] = int(stats.get("ou_iters", 0) + stats.get("uo_iters", 0) + stats.get("oo_iters", 0))
     return Phi_hat
 
 
-class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
+class BiRoLFLasso_Blockwise(BiRoLFLasso):
     def __init__(
         self,
         M: int,
@@ -2042,7 +2239,8 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         self.kappa_x = None
         self.kappa_y = None
         self._block_caches_ready = False
-        self.impute_use_backtracking = False
+        self.impute_use_backtracking = True
+        self._profile_ops = False
 
     def _init_blockwise_caches(self, x: np.ndarray, y: np.ndarray) -> None:
         if self._block_caches_ready:
@@ -2074,6 +2272,11 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
 
     def update(self, x: np.ndarray, y: np.ndarray, r: float):
         self._init_blockwise_caches(x, y)
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
+        self._last_block_iters = {}
 
         ci, cj = action_to_ij(self.chosen_action, self.N)
 
@@ -2095,14 +2298,28 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         self._update_impute_caches(ci, cj, r)
 
         L_imp = self._impute_lipschitz_upper()
+        impute_stats = {} if getattr(self, "_profile_ops", False) else None
+        impute_start = time.perf_counter()
         if self.impute_use_backtracking:
             Phi_impute = self._fista_l1_backtracking(
-                self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
+                self.impute_prev,
+                lam_impute,
+                self._grad_impute,
+                self._g_impute,
+                L_imp,
+                stats=impute_stats,
             )
         else:
             Phi_impute = self._fista_l1(
-                self.impute_prev, lam_impute, self._grad_impute, L_imp
+                self.impute_prev,
+                lam_impute,
+                self._grad_impute,
+                L_imp,
+                stats=impute_stats,
             )
+        self._last_impute_time = time.perf_counter() - impute_start
+        if impute_stats is not None:
+            self._last_impute_iters = int(impute_stats.get("iters", 0))
 
         pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
         # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
@@ -2150,7 +2367,8 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
             self.C[dx:, dy:] += S_uu
 
         mu = lam_main / float(self.Gamma)
-        optimization_start_time = time.time()
+        main_stats = {} if getattr(self, "_profile_ops", False) else None
+        optimization_start_time = time.perf_counter()
         Phi_main = solve_main_blockwise(
             B=self.B,
             Gx_o=self.G_Xo,
@@ -2169,13 +2387,23 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
             },
             lam_x_max=self.lam_x_max,
             lam_y_max=self.lam_y_max,
+            stats=main_stats,
         )
-        optimization_time = time.time() - optimization_start_time
+        optimization_time = time.perf_counter() - optimization_start_time
+        self._last_main_time = optimization_time
+        if main_stats is not None:
+            self._last_main_iters = int(main_stats.get("total_iters", 0))
+            self._last_block_iters = {
+                "oo_iters": int(main_stats.get("oo_iters", 0)),
+                "ou_iters": int(main_stats.get("ou_iters", 0)),
+                "uo_iters": int(main_stats.get("uo_iters", 0)),
+            }
 
-        if hasattr(self, "_timing_data") and self._timing_data is not None:
+        if not getattr(self, "_benchmark_mode", False) and hasattr(self, "_timing_data") and self._timing_data is not None:
             agent = self.__class__.__name__
             trial = getattr(self, "_trial", 0)
-            self._timing_data.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
+            timing_store = self._timing_data.get("optimization", self._timing_data)
+            timing_store.setdefault(agent, {}).setdefault(trial, []).append(optimization_time)
 
         self.Phi_hat = Phi_main
         self.Phi_check = Phi_impute

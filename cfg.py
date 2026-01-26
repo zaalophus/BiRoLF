@@ -88,8 +88,14 @@ def get_cfg():
     parser.add_argument("--block_use_batched", type=str2bool, default=True)
 
     # --- Optional BLAS thread control for multiprocessing ---
-    parser.add_argument("--set_blas_threads", type=str2bool, default=False)
+    parser.add_argument("--set_blas_threads", type=str2bool, default=True)
     parser.add_argument("--blas_threads_per_worker", type=int, default=1)
+    parser.add_argument("--benchmark_mode", type=str2bool, default=False)
+    parser.add_argument("--sequential_benchmark", type=str2bool, default=False)
+    parser.add_argument("--timing_breakdown", type=str2bool, default=False)
+    parser.add_argument("--timing_log_every", type=int, default=0)
+    parser.add_argument("--profile_ops", type=str2bool, default=False)
+    parser.add_argument("--profile_ops_log_every", type=int, default=0)
 
     cfg = parser.parse_args()
     if cfg.p1 is None:

@@ -19,10 +19,10 @@ AGENT_DICT = {
     "mab_ucb": r"UCB($\delta$)",
     "linucb": "LinUCB",
     "lints": "LinTS",
-    "rolf_lasso": "RoLF-Lasso (Kim & Park)",
-    "rolf_ridge": "RoLF-Ridge (Kim & Park)",
+    "rolf_lasso": "RoLF-Lasso",
+    "rolf_ridge": "RoLF-Ridge",
+    "birolf_lasso_old": "BiRoLF-Lasso-Old",
     "birolf_lasso": "BiRoLF-Lasso (Ours)",
-    "birolf_lasso_fista": "BiRoLF-Lasso-FISTA (Ours)",
     "birolf_lasso_blockwise": "BiRoLF-Lasso-Blockwise (Ours)",
     "estr_lowoful": "ESTR+LowOFUL",
     "dr_lasso": "DRLasso",
@@ -37,9 +37,10 @@ def _maybe_set_blas_threads():
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ["MKL_NUM_THREADS"] = str(n_threads)
     os.environ["OPENBLAS_NUM_THREADS"] = str(n_threads)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(n_threads)
     try:
         from threadpoolctl import threadpool_limits
-        threadpool_limits(limits=n_threads)
+        threadpool_limits(limits=n_threads, user_api="blas")
     except Exception:
         pass
 # --- Regularization multipliers (can be provided via cfg if added) ---
@@ -66,7 +67,9 @@ LOG_PATH = (
 )
 
 # Global timing tracking variables
-TIMING_DATA = {}  # {agent_name: {trial: [update_times]}}
+TIMING_DATA = {}  # {agent_name: {trial: [optimization_times]}}
+TIMING_BREAKDOWN = {}  # {agent_name: {trial: {choose/update/impute/main/overhead}}}
+TIMING_ITERS = {}  # {agent_name: {trial: {impute_iters/main_iters/block_iters}}}
 TOTAL_EXECUTION_TIMES = {}  # {agent_name: [total_times_per_trial]}
 
 # Import models after setting up TIMING_DATA
@@ -322,6 +325,36 @@ def bilinear_run_trial(
             d=total_obs_dim, arms=total_arms, lam1=1.0, lam2=0.5, zT=10, tr=True
         )
 
+    elif agent_type == "birolf_lasso_old":
+        if cfg.explore:
+            agent = BiRoLFLasso_old(
+                M=M,
+                N=N,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                explore=cfg.explore,
+                init_explore=exp_map[cfg.init_explore],
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+            )
+        else:
+            agent = BiRoLFLasso_old(
+                M=M,
+                N=N,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+            )
+
     elif agent_type == "birolf_lasso":
         if cfg.explore:
             agent = BiRoLFLasso(
@@ -340,36 +373,6 @@ def bilinear_run_trial(
             )
         else:
             agent = BiRoLFLasso(
-                M=M,
-                N=N,
-                sigma=noise_std,
-                delta=cfg.delta,
-                p=cfg.p,
-                p1=cfg.p1,
-                p2=cfg.p2,
-                theoretical_init_explore=False,
-                lam_c_impute=cfg.lamc_bi_impute,
-                lam_c_main=cfg.lamc_bi_main,
-            )
-
-    elif agent_type == "birolf_lasso_fista":
-        if cfg.explore:
-            agent = BiRoLFLasso_FISTA(
-                M=M,
-                N=N,
-                sigma=noise_std,
-                delta=cfg.delta,
-                p=cfg.p,
-                p1=cfg.p1,
-                p2=cfg.p2,
-                explore=cfg.explore,
-                init_explore=exp_map[cfg.init_explore],
-                theoretical_init_explore=False,
-                lam_c_impute=cfg.lamc_bi_impute,
-                lam_c_main=cfg.lamc_bi_main,
-            )
-        else:
-            agent = BiRoLFLasso_FISTA(
                 M=M,
                 N=N,
                 sigma=noise_std,
@@ -511,12 +514,14 @@ def bilinear_run_trial(
     # print(f"Agent : {agent.__class__.__name__}\t data shape : {data.shape}")
 
     # Set timing data for BiRoLF agents
-    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso', 'BiRoLFLasso_FISTA', 'BiRoLFLasso_Blockwise']:
+    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso_old', 'BiRoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
         agent._timing_data = timing_data
         agent._trial = now_trial
+        agent._benchmark_mode = getattr(cfg, "benchmark_mode", False)
+        agent._profile_ops = getattr(cfg, "profile_ops", False)
 
     # Measure total execution time
-    trial_start_time = time.time()
+    trial_start_time = time.perf_counter()
     regrets = bilinear_run(
         trial=now_trial,
         agent=agent,
@@ -530,7 +535,7 @@ def bilinear_run_trial(
         fname=fname,
         timing_data=timing_data,
     )
-    trial_total_time = time.time() - trial_start_time
+    trial_total_time = time.perf_counter() - trial_start_time
     
     # Store total execution time in local timing data
     agent_name = agent.__class__.__name__
@@ -570,7 +575,7 @@ def bilinear_run(
     # For linear contextual bandits
     # For RoLF this is (MN,MN), otherwise (MN,d_x*d_y)
     z = None
-    if not isinstance(agent, (BiRoLFLasso, BiRoLFLasso_FISTA, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+    if not isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
         z = np.kron(x, y)
 
     # z = np.kron(x, y)
@@ -590,12 +595,14 @@ def bilinear_run(
             distribution=noise_dist, size=1, std=noise_std
         )
 
-        if isinstance(agent, (BiRoLFLasso, BiRoLFLasso_FISTA, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+        choose_start_time = time.perf_counter()
+        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
             chosen_action = agent.choose(x, y)
         elif isinstance(agent, ContextualBandit):
             chosen_action = agent.choose(z)
         else:
             chosen_action = agent.choose()
+        choose_time = time.perf_counter() - choose_start_time
         chosen_i, chosen_j = action_to_ij(chosen_action, N)
         chosen_reward = exp_rewards_mat[chosen_i][chosen_j] + noise
 
@@ -624,14 +631,58 @@ def bilinear_run(
         regrets[t] = optimal_reward - exp_rewards_mat[chosen_i, chosen_j]
 
         ## update the agent with timing measurement
-        update_start_time = time.time()
-        if isinstance(agent, (BiRoLFLasso, BiRoLFLasso_FISTA, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+        update_start_time = time.perf_counter()
+        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
             agent.update(x=x, y=y, r=chosen_reward)
         elif isinstance(agent, ContextualBandit):
             agent.update(x=z, r=chosen_reward)
         else:
             agent.update(a=chosen_action, r=chosen_reward)
-        update_time = time.time() - update_start_time
+        update_time = time.perf_counter() - update_start_time
+
+        if timing_data is not None and getattr(cfg, "timing_breakdown", False):
+            agent_name = agent.__class__.__name__
+            breakdown = timing_data.setdefault("breakdown", {})
+            trial_store = breakdown.setdefault(agent_name, {}).setdefault(trial, {
+                "choose": [],
+                "update": [],
+                "impute": [],
+                "main": [],
+                "overhead": [],
+            })
+            impute_time = float(getattr(agent, "_last_impute_time", 0.0))
+            main_time = float(getattr(agent, "_last_main_time", 0.0))
+            overhead = max(0.0, update_time - impute_time - main_time)
+            trial_store["choose"].append(choose_time)
+            trial_store["update"].append(update_time)
+            trial_store["impute"].append(impute_time)
+            trial_store["main"].append(main_time)
+            trial_store["overhead"].append(overhead)
+
+            if getattr(cfg, "profile_ops", False):
+                iters = timing_data.setdefault("iters", {})
+                it_store = iters.setdefault(agent_name, {}).setdefault(trial, {
+                    "impute_iters": [],
+                    "main_iters": [],
+                    "block_oo_iters": [],
+                    "block_ou_iters": [],
+                    "block_uo_iters": [],
+                })
+                it_store["impute_iters"].append(int(getattr(agent, "_last_impute_iters", 0)))
+                it_store["main_iters"].append(int(getattr(agent, "_last_main_iters", 0)))
+                block_iters = getattr(agent, "_last_block_iters", {}) or {}
+                it_store["block_oo_iters"].append(int(block_iters.get("oo_iters", 0)))
+                it_store["block_ou_iters"].append(int(block_iters.get("ou_iters", 0)))
+                it_store["block_uo_iters"].append(int(block_iters.get("uo_iters", 0)))
+
+            log_every = int(getattr(cfg, "timing_log_every", 0) or 0)
+            if log_every > 0 and ((t + 1) % log_every == 0):
+                log_msg = (
+                    f"round={t+1} agent={agent_name} choose={choose_time:.6e}s "
+                    f"update={update_time:.6e}s impute={impute_time:.6e}s main={main_time:.6e}s "
+                    f"overhead={overhead:.6e}s"
+                )
+                save_log(path=LOG_PATH, fname=fname, string=log_msg)
         
         # Store total update time (not just lasso optimization time)
         # The lasso optimization timing is handled separately in models.py
@@ -690,7 +741,7 @@ def bilinear_run_agent(args):
     start = time.perf_counter()
 
     # Initialize local timing data for this process
-    local_timing_data = {}
+    local_timing_data = {"optimization": {}, "breakdown": {}, "iters": {}}
     
     regrets = bilinear_run_trial(
         agent_type=agent_type,
@@ -716,7 +767,9 @@ def bilinear_run_agent(args):
     # Create unique filename including experiment parameters to avoid collisions
     timing_file = f"/tmp/timing_{agent_type}_{now_trial}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_noise_{cfg.reward_std}_run_{RUN_TAG}.pkl"
     timing_info = {
-        'optimization_times': local_timing_data,
+        'optimization_times': local_timing_data.get('optimization', local_timing_data),
+        'timing_breakdown': local_timing_data.get('breakdown', {}),
+        'timing_iters': local_timing_data.get('iters', {}),
         'total_time': end - start,
         'agent_name': agent_display_name,
         'trial': now_trial
@@ -744,14 +797,14 @@ def plot_optimization_timing_comparison():
 
     agent_order = [
         "RoLFLasso",
+        "BiRoLFLasso_old",
         "BiRoLFLasso",
-        "BiRoLFLasso_FISTA",
         "BiRoLFLasso_Blockwise",
     ]
     display_names = {
         "RoLFLasso": "RoLF-Lasso",
-        "BiRoLFLasso": "BiRoLF-Lasso",
-        "BiRoLFLasso_FISTA": "BiRoLF-Lasso-FISTA",
+        "BiRoLFLasso_old": "BiRoLF-Lasso-Old",
+        "BiRoLFLasso": "BiRoLF-Lasso (Ours)",
         "BiRoLFLasso_Blockwise": "BiRoLF-Lasso-Blockwise",
     }
 
@@ -778,8 +831,8 @@ def plot_optimization_timing_comparison():
     # Create bars with different colors and transparency for variance
     palette = {
         "RoLFLasso": "#6B7280",
-        "BiRoLFLasso": "#4472C4",
-        "BiRoLFLasso_FISTA": "#E15759",
+        "BiRoLFLasso_old": "#9CA3AF",
+        "BiRoLFLasso": "#E15759",
         "BiRoLFLasso_Blockwise": "#59A14F",
     }
     colors = [palette.get(agent, "#A5A5A5") for agent in agents]
@@ -791,10 +844,16 @@ def plot_optimization_timing_comparison():
     # Add error bars (standard deviation)
     ax.errorbar(x_pos, times, yerr=errors, fmt='none', color='black', capsize=8, capthick=2, linewidth=2)
 
-    # Add shaded regions for standard deviation
+    # Add shaded regions for standard deviation (show legend for all agents)
     for i, (x, time_val, err) in enumerate(zip(x_pos, times, errors)):
-        ax.fill_between([x-0.3, x+0.3], [time_val-err, time_val-err], [time_val+err, time_val+err], 
-                       color=colors[i], alpha=0.2, label=f'±1σ {agents[i]}' if i < 2 else None)
+        ax.fill_between(
+            [x - 0.3, x + 0.3],
+            [time_val - err, time_val - err],
+            [time_val + err, time_val + err],
+            color=colors[i],
+            alpha=0.2,
+            label=f'±1σ {agents[i]}',
+        )
     
     # Add value labels on bars
     y_max = max(times)
@@ -871,17 +930,16 @@ def plot_total_execution_time_comparison():
     times = [avg_times[agent] for agent in sorted_agents]
     errors = [std_times[agent] for agent in sorted_agents]
     
-    # Color BiRoLF algorithms differently with better color scheme
+    # Color only BiRoLF-Lasso and BiRoLF-Lasso-Blockwise; keep others gray
     colors = []
     edge_colors = []
     for agent in sorted_agents:
-        if 'BiRoLF' in agent:
-            if 'FISTA' in agent:
-                colors.append('#E15759')  # Red for FISTA
-                edge_colors.append('#B91C1C')
-            else:
-                colors.append('#4472C4')  # Blue for original BiRoLF
-                edge_colors.append('#1E40AF')
+        if "BiRoLF-Lasso-Blockwise" in agent:
+            colors.append('#4472C4')  # Blue for BiRoLF-Lasso-Blockwise
+            edge_colors.append('#1E40AF')
+        elif "BiRoLF-Lasso" in agent:
+            colors.append('#E15759')  # Red for BiRoLF-Lasso (Ours)
+            edge_colors.append('#B91C1C')
         else:
             colors.append('#A5A5A5')  # Gray for others
             edge_colors.append('#6B7280')
@@ -914,14 +972,14 @@ def plot_total_execution_time_comparison():
     ax.set_title(f'Total Execution Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='x', linestyle='--')
     
-    # Highlight BiRoLF algorithms
+    # Highlight only BiRoLF-Lasso and BiRoLF-Lasso-Blockwise
     for i, agent in enumerate(sorted_agents):
-        if 'BiRoLF' in agent:
+        if "BiRoLF-Lasso-Blockwise" in agent:
             ax.get_yticklabels()[i].set_weight('bold')
-            if 'FISTA' in agent:
-                ax.get_yticklabels()[i].set_color('#E15759')
-            else:
-                ax.get_yticklabels()[i].set_color('#4472C4')
+            ax.get_yticklabels()[i].set_color('#4472C4')
+        elif "BiRoLF-Lasso" in agent:
+            ax.get_yticklabels()[i].set_weight('bold')
+            ax.get_yticklabels()[i].set_color('#E15759')
     
     plt.tight_layout()
     
@@ -947,6 +1005,97 @@ def plot_total_execution_time_comparison():
     print("="*80)
 
 
+def summarize_timing_breakdown():
+    """Summarize per-round timing breakdown (choose/update/impute/main/overhead)."""
+    if not TIMING_BREAKDOWN:
+        print("No timing breakdown data available.")
+        return
+
+    summary = {}
+    for agent_name, trial_data in TIMING_BREAKDOWN.items():
+        all_metrics = {k: [] for k in ["choose", "update", "impute", "main", "overhead"]}
+        for metrics in trial_data.values():
+            for key in all_metrics:
+                all_metrics[key].extend(metrics.get(key, []))
+        if all_metrics["update"]:
+            summary[agent_name] = {k: float(np.mean(v)) if v else 0.0 for k, v in all_metrics.items()}
+
+    if not summary:
+        print("No timing breakdown data to summarize.")
+        return
+
+    os.makedirs(RESULT_PATH, exist_ok=True)
+    fname = f"timing_breakdown_summary_M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}.txt"
+    with open(f"{RESULT_PATH}/{fname}", "w") as f:
+        f.write("agent\tchoose\tupdate\timpute\tmain\toverhead\n")
+        for agent_name, metrics in summary.items():
+            f.write(
+                f"{agent_name}\t{metrics['choose']:.6e}\t{metrics['update']:.6e}\t"
+                f"{metrics['impute']:.6e}\t{metrics['main']:.6e}\t{metrics['overhead']:.6e}\n"
+            )
+
+    print("\n" + "="*60)
+    print("PER-ROUND TIMING BREAKDOWN (AVERAGE)")
+    print("="*60)
+    for agent_name, metrics in summary.items():
+        print(
+            f"{agent_name}: choose={metrics['choose']:.6e}s "
+            f"update={metrics['update']:.6e}s impute={metrics['impute']:.6e}s "
+            f"main={metrics['main']:.6e}s overhead={metrics['overhead']:.6e}s"
+        )
+    print("="*60)
+    print(f"Saved: {RESULT_PATH}/{fname}")
+
+
+def summarize_iteration_counts():
+    """Summarize per-round iteration counts for FISTA-based solvers."""
+    if not TIMING_ITERS:
+        print("No iteration count data available.")
+        return
+
+    summary = {}
+    for agent_name, trial_data in TIMING_ITERS.items():
+        all_metrics = {
+            "impute_iters": [],
+            "main_iters": [],
+            "block_oo_iters": [],
+            "block_ou_iters": [],
+            "block_uo_iters": [],
+        }
+        for metrics in trial_data.values():
+            for key in all_metrics:
+                all_metrics[key].extend(metrics.get(key, []))
+        if all_metrics["impute_iters"] or all_metrics["main_iters"]:
+            summary[agent_name] = {k: float(np.mean(v)) if v else 0.0 for k, v in all_metrics.items()}
+
+    if not summary:
+        print("No iteration count data to summarize.")
+        return
+
+    os.makedirs(RESULT_PATH, exist_ok=True)
+    fname = f"iter_counts_summary_M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}.txt"
+    with open(f"{RESULT_PATH}/{fname}", "w") as f:
+        f.write("agent\timpute_iters\tmain_iters\tblock_oo_iters\tblock_ou_iters\tblock_uo_iters\n")
+        for agent_name, metrics in summary.items():
+            f.write(
+                f"{agent_name}\t{metrics['impute_iters']:.3f}\t{metrics['main_iters']:.3f}\t"
+                f"{metrics['block_oo_iters']:.3f}\t{metrics['block_ou_iters']:.3f}\t{metrics['block_uo_iters']:.3f}\n"
+            )
+
+    print("\n" + "="*60)
+    print("PER-ROUND ITERATION COUNTS (AVERAGE)")
+    print("="*60)
+    for agent_name, metrics in summary.items():
+        print(
+            f"{agent_name}: impute_iters={metrics['impute_iters']:.2f} "
+            f"main_iters={metrics['main_iters']:.2f} "
+            f"block(oo/ou/uo)={metrics['block_oo_iters']:.2f}/"
+            f"{metrics['block_ou_iters']:.2f}/{metrics['block_uo_iters']:.2f}"
+        )
+    print("="*60)
+    print(f"Saved: {RESULT_PATH}/{fname}")
+
+
 def save_timing_data():
     """Save timing data to pkl files"""
     import pickle
@@ -964,6 +1113,8 @@ def save_timing_data():
     timing_summary = {
         'optimization_times': dict(TIMING_DATA) if TIMING_DATA else {},
         'total_execution_times': dict(TOTAL_EXECUTION_TIMES) if TOTAL_EXECUTION_TIMES else {},
+        'timing_breakdown': dict(TIMING_BREAKDOWN) if TIMING_BREAKDOWN else {},
+        'timing_iters': dict(TIMING_ITERS) if TIMING_ITERS else {},
         'config': vars(cfg),
         'timestamp': dt.now().isoformat()
     }
@@ -1032,6 +1183,8 @@ def plot_timing_analysis():
     print("Generating timing analysis plots...")
     plot_optimization_timing_comparison()
     plot_total_execution_time_comparison()
+    summarize_timing_breakdown()
+    summarize_iteration_counts()
     
     # Save timing data as pkl file
     save_timing_data()
@@ -1040,6 +1193,7 @@ def plot_timing_analysis():
 
 if __name__ == "__main__":
     ##
+    _maybe_set_blas_threads()
 
     ## hyper-parameters
     M = cfg.arm_x
@@ -1055,8 +1209,8 @@ if __name__ == "__main__":
     SEED = cfg.seed
     sigma = cfg.reward_std
     AGENTS = [
-        # "birolf_lasso",
-        "birolf_lasso_fista",
+        # "birolf_lasso_old",
+        "birolf_lasso",
         "birolf_lasso_blockwise",
         "rolf_lasso",
         "rolf_ridge",
@@ -1075,24 +1229,27 @@ if __name__ == "__main__":
     # Parallel execution using ProcessPoolExecutor
     # Prepare arguments for each worker (simplified - no shared data needed)
     worker_args = [(trial_agent, None, None) for trial_agent in TRIALS_AGENTS]
-    
-    with ProcessPoolExecutor(max_workers=16) as executor:
-        results = executor.map(bilinear_run_agent, worker_args)
+
+    if getattr(cfg, "sequential_benchmark", False):
+        results = map(bilinear_run_agent, worker_args)
+    else:
+        with ProcessPoolExecutor(max_workers=16) as executor:
+            results = executor.map(bilinear_run_agent, worker_args)
 
     # Collect results and timing data
     regret_results = dict()
     time_check = dict()
     timing_files = []
     
-    for key, regrets, time, timing_file in results:
+    for key, regrets, elapsed, timing_file in results:
         now_trial, agent_type = key
 
         if agent_type not in regret_results.keys():
             regret_results[agent_type] = np.zeros(cfg.trials, dtype=object)
-            time_check[agent_type] = time
+            time_check[agent_type] = elapsed
 
         regret_results[agent_type][now_trial] = regrets[0]
-        time_check[agent_type] += time
+        time_check[agent_type] += elapsed
         
         if timing_file:
             timing_files.append(timing_file)
@@ -1104,14 +1261,49 @@ if __name__ == "__main__":
                 timing_info = pickle.load(f)
             
             # Process optimization timing data
-            if timing_info['optimization_times']:
-                for class_name, trial_data in timing_info['optimization_times'].items():
+            opt_times = timing_info.get('optimization_times', {})
+            if opt_times:
+                for class_name, trial_data in opt_times.items():
                     if class_name not in TIMING_DATA:
                         TIMING_DATA[class_name] = {}
                     for trial_num, times in trial_data.items():
                         if trial_num not in TIMING_DATA[class_name]:
                             TIMING_DATA[class_name][trial_num] = []
                         TIMING_DATA[class_name][trial_num].extend(times)
+
+            breakdown = timing_info.get('timing_breakdown', {})
+            if breakdown:
+                for class_name, trial_data in breakdown.items():
+                    if class_name not in TIMING_BREAKDOWN:
+                        TIMING_BREAKDOWN[class_name] = {}
+                    for trial_num, metrics in trial_data.items():
+                        if trial_num not in TIMING_BREAKDOWN[class_name]:
+                            TIMING_BREAKDOWN[class_name][trial_num] = {
+                                "choose": [],
+                                "update": [],
+                                "impute": [],
+                                "main": [],
+                                "overhead": [],
+                            }
+                        for key in TIMING_BREAKDOWN[class_name][trial_num]:
+                            TIMING_BREAKDOWN[class_name][trial_num][key].extend(metrics.get(key, []))
+
+            iters = timing_info.get('timing_iters', {})
+            if iters:
+                for class_name, trial_data in iters.items():
+                    if class_name not in TIMING_ITERS:
+                        TIMING_ITERS[class_name] = {}
+                    for trial_num, metrics in trial_data.items():
+                        if trial_num not in TIMING_ITERS[class_name]:
+                            TIMING_ITERS[class_name][trial_num] = {
+                                "impute_iters": [],
+                                "main_iters": [],
+                                "block_oo_iters": [],
+                                "block_ou_iters": [],
+                                "block_uo_iters": [],
+                            }
+                        for key in TIMING_ITERS[class_name][trial_num]:
+                            TIMING_ITERS[class_name][trial_num][key].extend(metrics.get(key, []))
             
             # Process total execution timing data
             agent_name = timing_info['agent_name']

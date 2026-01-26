@@ -39,9 +39,12 @@ def shermanMorrison(V: np.ndarray, x: np.ndarray):
     x: a new observed context
     return: inverse of new gram matrix
     """
-    numerator = np.einsum("ij, j, k, kl -> il", V, x, x, V)
-    denominator = 1 + np.einsum("i, ij, j ->", x, V, x)
-    return V - (numerator / denominator)
+    v_x = V @ x
+    denom = 1.0 + float(x @ v_x)
+    if denom <= 0.0:
+        return V
+    V -= np.outer(v_x, v_x) / denom
+    return V
 
 
 def vector_norm(v: np.ndarray, type: str):
@@ -600,3 +603,23 @@ def action_to_ij(a: int, N: int):
 
 def ij_to_action(i: int, j: int, N: int):
     return i * N + j
+
+
+def pseudo_action_match_rate(
+    total_arms: int,
+    p: float,
+    chosen: int,
+    trials: int = 10000,
+    rng: np.random.Generator = None,
+) -> float:
+    """Empirically check P(pseudo==chosen) under conditional pseudo sampling."""
+    if rng is None:
+        rng = np.random.default_rng()
+    if total_arms <= 1:
+        return 1.0
+    p = float(np.clip(p, 0.0, 1.0))
+    chosen = int(chosen)
+    pseudo_dist = np.full(total_arms, (1.0 - p) / (total_arms - 1), dtype=float)
+    pseudo_dist[chosen] = p
+    samples = rng.choice(total_arms, size=trials, p=pseudo_dist)
+    return float(np.mean(samples == chosen))
