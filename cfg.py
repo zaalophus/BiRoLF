@@ -18,7 +18,7 @@ def get_cfg():
     parser.add_argument("--explore", action="store_true", default=True)
     parser.add_argument("--init_explore", type=str, choices=["quad", "triple", "sqr", "K", "double"], default="double")
     parser.add_argument("--verbose", action="store_true", default=False)
-    parser.add_argument("--trials", type=int, default=5)
+    parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--case", type=int, default=1)
 
     ## For Linear model only
@@ -36,7 +36,7 @@ def get_cfg():
     parser.add_argument("--p1", type=float, default=None, help="(Optional) legacy BiRoLF p1; defaults to p")
     parser.add_argument("--p2", type=float, default=None, help="(Optional) legacy BiRoLF p2; defaults to p")
 
-    parser.add_argument("--horizon", "-T", type=int, default=1000)
+    parser.add_argument("--horizon", "-T", type=int, default=10)
     parser.add_argument("--seed", "-S", type=int, default=123)
     parser.add_argument("--rho_sq", type=float, default=0.5)
     
@@ -80,9 +80,11 @@ def get_cfg():
                         help="Scale for BiRoLF (Lasso/FISTA) main lambda")
 
     # --- Blockwise main solver options ---
-    parser.add_argument("--block_oo_max_iter", type=int, default=100)
-    parser.add_argument("--block_ou_max_iter", type=int, default=50)
-    parser.add_argument("--block_uo_max_iter", type=int, default=50)
+    parser.add_argument("--optimizer_max_iter", type=int, default=1000)
+    
+    # parser.add_argument("--block_oo_max_iter", type=int, default=100)
+    # parser.add_argument("--block_ou_max_iter", type=int, default=50)
+    # parser.add_argument("--block_uo_max_iter", type=int, default=50)
     parser.add_argument("--block_tol", type=float, default=1e-6)
     parser.add_argument("--block_use_fista", type=str2bool, default=True)
     parser.add_argument("--block_use_batched", type=str2bool, default=True)

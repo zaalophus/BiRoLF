@@ -377,6 +377,7 @@ class RoLFLasso(ContextualBandit):
         init_explore: int = 0,
         lam_c_impute: float = 1.0,
         lam_c_main: float = 1.0,
+        optimizer_max_iter: int = 100
     ):
         self.lam_c_impute = lam_c_impute
         self.lam_c_main = lam_c_main
@@ -398,7 +399,7 @@ class RoLFLasso(ContextualBandit):
         )  # history of rounds that the pseudo action and the chosen action matched
         self.explore = explore
         self.init_explore = init_explore
-        self.fista_max_iter = 200
+        self.fista_max_iter = optimizer_max_iter
         self.fista_tol = 1e-6
         self._arm_indices = np.arange(self.K)
 
@@ -1302,6 +1303,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         theoretical_init_explore: bool = False,
         lam_c_impute: float = 1.0,
         lam_c_main: float = 1.0,
+        optimizer_max_iter: int = 100
     ):
         # --- tunable regularization multipliers ---
         self.lam_c_impute = lam_c_impute
@@ -1347,7 +1349,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self.C_sum = np.zeros((self.M, self.N), dtype=float)
 
         # FISTA hyper-params
-        self.fista_max_iter = 200
+        self.fista_max_iter = optimizer_max_iter
         self.fista_tol = 1e-6
 
     # ---------- utilities ----------
@@ -1449,7 +1451,7 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         Y = Phi0.copy()
         t_par = 1.0
 
-        for _ in range(max_iter):
+        for now_iter in range(max_iter):
             G = grad_fn(Y)
             if not np.all(np.isfinite(G)):
                 break
@@ -1696,7 +1698,7 @@ def fista_lasso_vector(
     L = max(float(L), 1e-12)
     y = x.copy()
     t_par = 1.0
-    for _ in range(max_iter):
+    for now_iter in range(max_iter):
         grad = 2.0 * (G @ y) - 2.0 * b
         x_next = soft_threshold(y - grad / L, mu / L)
         if use_fista:
@@ -1741,7 +1743,7 @@ def fista_lasso_matrix(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
-    for _ in range(max_iter):
+    for now_iter in range(max_iter):
         grad = 2.0 * (Gx @ Y @ Gy) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1782,7 +1784,7 @@ def fista_lasso_left_batched(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
-    for _ in range(max_iter):
+    for now_iter in range(max_iter):
         grad = 2.0 * (G @ Y) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1823,7 +1825,7 @@ def fista_lasso_right_batched(
     L = max(float(L), 1e-12)
     Y = X.copy()
     t_par = 1.0
-    for _ in range(max_iter):
+    for now_iter in range(max_iter):
         grad = 2.0 * (Y @ G) - 2.0 * B
         X_next = soft_threshold(Y - grad / L, mu / L)
         if use_fista:
@@ -1867,9 +1869,9 @@ def solve_main_blockwise(
     if params is None:
         params = {}
 
-    block_oo_max_iter = int(params.get("block_oo_max_iter", 100))
-    block_ou_max_iter = int(params.get("block_ou_max_iter", 50))
-    block_uo_max_iter = int(params.get("block_uo_max_iter", 50))
+    block_oo_max_iter = int(params.get("optimizer_max_iter", 100))
+    block_ou_max_iter = int(params.get("optimizer_max_iter", 100))
+    block_uo_max_iter = int(params.get("optimizer_max_iter", 100))
     block_tol = float(params.get("block_tol", 1e-6))
     block_use_fista = bool(params.get("block_use_fista", True))
     block_use_batched = bool(params.get("block_use_batched", True))
@@ -1982,8 +1984,8 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         lam_c_impute: float = 1.0,
         lam_c_main: float = 1.0,
         block_oo_max_iter: int = 100,
-        block_ou_max_iter: int = 50,
-        block_uo_max_iter: int = 50,
+        block_ou_max_iter: int = 100,
+        block_uo_max_iter: int = 100,
         block_tol: float = 1e-6,
         block_use_fista: bool = True,
         block_use_batched: bool = True,
@@ -2371,7 +2373,7 @@ class ESTRLowOFUL(ContextualBandit):
         return int(i), int(j)
 
     def _finalize_stage1(self) -> None:
-        """Estimate Θ_hat via the d1×d2 averages and compute subspaces."""
+        """Estimate Θ_hat via the d1*d2 averages and compute subspaces."""
         # Average reward matrix on the selected grid
         K_tilde = np.divide(
             self.K_sum,
