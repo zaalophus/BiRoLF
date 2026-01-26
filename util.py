@@ -535,6 +535,8 @@ def bilinear_param_generator(
 def save_plot(fig: Figure, path: str, time_check:dict, fname: str, extension: str = "pdf"):
     os.makedirs(path, exist_ok=True)
     fig.savefig(f"{path}/{fname}.{extension}")
+    if extension != "png":
+        fig.savefig(f"{path}/{fname}.png", dpi=300, bbox_inches="tight")
     
     models = list(time_check.keys())
     times = list(time_check.values())

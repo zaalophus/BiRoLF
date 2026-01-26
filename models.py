@@ -401,6 +401,30 @@ class RoLFLasso(ContextualBandit):
         self.fista_max_iter = 200
         self.fista_tol = 1e-6
         self._arm_indices = np.arange(self.K)
+        self._static_arms_initialized = False
+        self.X_static = None
+        self.G_main_base = None
+        self.lam_main_max = None
+        self.Gamma_main = 0
+        self.sum_xx = None
+        self.sum_r_x = None
+        self.b_main = None
+        self.G_imp = None
+        self.b_imp = None
+
+    def _init_main_cache(self, x: np.ndarray) -> None:
+        if self._static_arms_initialized:
+            return
+        self.X_static = x
+        self.d = int(self.X_static.shape[1])
+        self.G_main_base = self.X_static.T @ self.X_static
+        self.lam_main_max = float(np.max(np.linalg.eigvalsh(self.G_main_base))) if self.G_main_base.size else 0.0
+        self.sum_xx = np.zeros((self.d, self.d), dtype=float)
+        self.sum_r_x = np.zeros(self.d, dtype=float)
+        self.b_main = np.zeros(self.d, dtype=float)
+        self.G_imp = np.zeros((self.d, self.d), dtype=float)
+        self.b_imp = np.zeros(self.d, dtype=float)
+        self._static_arms_initialized = True
 
     def choose(self, x: np.ndarray):
         # x : (K, d) augmented feature matrix where each row denotes the augmented features
@@ -423,17 +447,19 @@ class RoLFLasso(ContextualBandit):
         self._ahat_history = getattr(self, "_ahat_history", {})
         self._ahat_history[self.t] = a_hat
 
-        ## sampling actions (resample chosen and pseudo until match or max_iter)
-        count = 0
-        max_iter = int(np.log((self.t + 1) ** 2 / self.delta) / np.log(1 / self.p))
+        ## sampling actions (paper coupling: pseudo is conditional on chosen)
+        denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
+        max_iter = int(
+            np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
+        )
 
         chosen_dist = np.full(self.K, (1.0 / np.sqrt(self.t)) / max(self.K - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
+        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
-        chosen_action = -2
+        count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
             pseudo_dist = np.full(self.K, (1.0 - self.p) / max(self.K - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
@@ -457,6 +483,7 @@ class RoLFLasso(ContextualBandit):
 
         self.action_history.append(self.chosen_action)
         self.reward_history.append(r)
+        self._init_main_cache(x)
 
         # lam_impute = 2 * self.p * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
         # lam_main = (1 + 2 / self.p) * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
@@ -470,14 +497,13 @@ class RoLFLasso(ContextualBandit):
               np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta)))
 
         ## compute the imputation estimator (FISTA on quadratic form)
-        data_impute = x[self.action_history, :]  # (t, d) matrix
-        target_impute = np.array(self.reward_history)
-        G_imp = data_impute.T @ data_impute
-        b_imp = data_impute.T @ target_impute
-        L_imp = 2.0 * max(float(np.max(np.linalg.eigvalsh(G_imp))), 1e-12)
+        chosen_context = x[self.chosen_action, :]
+        self.G_imp += np.outer(chosen_context, chosen_context)
+        self.b_imp += r * chosen_context
+        L_imp = 2.0 * max(float(np.max(np.linalg.eigvalsh(self.G_imp))), 1e-12)
         mu_impute = fista_lasso_vector(
-            G_imp,
-            b_imp,
+            self.G_imp,
+            self.b_imp,
             lam_impute,
             self.impute_prev,
             L_imp,
@@ -486,25 +512,8 @@ class RoLFLasso(ContextualBandit):
             use_fista=True,
         )
 
-        ## compute and update the pseudo rewards
-        if self.matching:
-            for key in self.matching:
-                matched, data, _, chosen, reward = self.matching[key]
-                if matched:
-                    new_pseudo_rewards = data @ mu_impute
-                    new_pseudo_rewards[chosen] += (1 / self.p) * (
-                        reward - (data[chosen, :] @ mu_impute)
-                    )
-                    # overwrite the value
-                    self.matching[key] = (
-                        matched,
-                        data,
-                        new_pseudo_rewards,
-                        chosen,
-                        reward,
-                    )
-
         ## compute the pseudo rewards for the current data
+        # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
         pseudo_rewards = x @ mu_impute
         pseudo_rewards[self.chosen_action] += (1 / self.p) * (
             r - (x[self.chosen_action, :] @ mu_impute)
@@ -517,19 +526,23 @@ class RoLFLasso(ContextualBandit):
             r,
         )
 
-        ## compute the main estimator (FISTA on stacked quadratic form)
-        matched_keys = [key for key, value in self.matching.items() if value[0]]
-        X_list = [self.matching[key][1] for key in matched_keys]
-        pseudo_rewards_list = [self.matching[key][2] for key in matched_keys]
-        X_main = np.vstack(X_list)
-        y_main = np.concatenate(pseudo_rewards_list)
-        G_main = X_main.T @ X_main
-        b_main = X_main.T @ y_main
-        L_main = 2.0 * max(float(np.max(np.linalg.eigvalsh(G_main))), 1e-12)
+        ## compute the main estimator (FISTA on quadratic form)
+        self.Gamma_main += 1
+        chosen_context = x[self.chosen_action, :]
+        self.sum_xx += np.outer(chosen_context, chosen_context)
+        self.sum_r_x += r * chosen_context
+        # Use current imputation estimate for all matched rounds (paper definition).
+        self.b_main = (
+            self.Gamma_main * (self.G_main_base @ mu_impute)
+            + (1.0 / self.p) * self.sum_r_x
+            - (1.0 / self.p) * (self.sum_xx @ mu_impute)
+        )
+        G_main = self.G_main_base * float(self.Gamma_main)
+        L_main = 2.0 * max(self.lam_main_max, 1e-12) * float(self.Gamma_main)
         optimization_start_time = time.time()
         mu_main = fista_lasso_vector(
             G_main,
-            b_main,
+            self.b_main,
             lam_main,
             self.main_prev,
             L_main,
@@ -634,6 +647,9 @@ class RoLFRidge(ContextualBandit):
         self.G_main = None
         self.G_eigvals = None
         self.G_eigvecs = None
+        self.sum_pseudo = np.zeros(self.K)
+        self.gamma = 0
+        self._arm_indices = np.arange(self.K)
 
     def _init_main_cache(self, x: np.ndarray) -> None:
         if self._static_arms_initialized:
@@ -665,27 +681,23 @@ class RoLFRidge(ContextualBandit):
         self._ahat_history = getattr(self, "_ahat_history", {})
         self._ahat_history[self.t] = a_hat
 
-        ## sampling actions
-        pseudo_action = -1
-        chosen_action = -2
-        count = 0
-        max_iter = int(np.log((self.t + 1) ** 2 / self.delta) / np.log(1 / self.p))
-        pseudo_dist = np.array([(1 - self.p) / (self.K - 1)] * self.K, dtype=float)
-        pseudo_dist[a_hat] = self.p
+        ## sampling actions (fixed chosen; resample pseudo only up to rho_t)
+        denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
+        max_iter = int(
+            np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
+        )
         chosen_dist = np.array(
             [(1 / np.sqrt(self.t)) / (self.K - 1)] * self.K, dtype=float
         )
         chosen_dist[a_hat] = 1 - (1 / np.sqrt(self.t))
-            
+
+        chosen_action = np.random.choice(self._arm_indices, size=1, replace=False, p=chosen_dist).item()
+        pseudo_action = -1
+        count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            ## Sample the pseudo action
-            pseudo_action = np.random.choice(
-                [i for i in range(self.K)], size=1, replace=False, p=pseudo_dist
-            ).item()
-            ## Sample the chosen action
-            chosen_action = np.random.choice(
-                [i for i in range(self.K)], size=1, replace=False, p=chosen_dist
-            ).item()
+            pseudo_dist = np.array([(1 - self.p) / (self.K - 1)] * self.K, dtype=float)
+            pseudo_dist[chosen_action] = self.p
+            pseudo_action = np.random.choice(self._arm_indices, size=1, replace=False, p=pseudo_dist).item()
             count += 1
 
         self.pseudo_action = pseudo_action
@@ -704,28 +716,6 @@ class RoLFRidge(ContextualBandit):
             self.xty_impute += r * chosen_context
             mu_impute = self.Vinv_impute @ self.xty_impute
 
-            ## compute and update the pseudo rewards
-            sum_pseudo = np.zeros(self.K)
-            gamma = 0
-            if self.matching:
-                for key in self.matching:
-                    matched, data, _, chosen, reward = self.matching[key]
-                    if matched:
-                        new_pseudo_rewards = data @ mu_impute
-                        new_pseudo_rewards[chosen] += (1 / self.p) * (
-                            reward - (data[chosen, :] @ mu_impute)
-                        )
-                        # overwrite the value
-                        self.matching[key] = (
-                            matched,
-                            data,
-                            new_pseudo_rewards,
-                            chosen,
-                            reward,
-                        )
-                        sum_pseudo += new_pseudo_rewards
-                        gamma += 1
-
             ## compute the pseudo rewards for the current data
             pseudo_rewards = x @ mu_impute
             pseudo_rewards[self.chosen_action] += (1 / self.p) * (
@@ -738,12 +728,12 @@ class RoLFRidge(ContextualBandit):
                 self.chosen_action,
                 r,
             )
-            sum_pseudo += pseudo_rewards
-            gamma += 1
+            self.sum_pseudo += pseudo_rewards
+            self.gamma += 1
 
             ## compute the main estimator using cached eigendecomposition
-            b_main = self.X_static.T @ sum_pseudo
-            denom = 1.0 + gamma * self.G_eigvals
+            b_main = self.X_static.T @ self.sum_pseudo
+            denom = 1.0 + self.gamma * self.G_eigvals
             mu_main = self.G_eigvecs @ ((self.G_eigvecs.T @ b_main) / denom)
 
             ## update the mu_hat
@@ -1066,20 +1056,20 @@ class BiRoLFLasso(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (self.i_hat, self.j_hat)
 
-        ## sampling actions (resample chosen and pseudo until match or max_iter)
+        ## sampling actions (fixed chosen; resample pseudo only up to rho_t)
         total_arms = self.M * self.N
+        denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
         max_iter = int(
-            np.log(2 * ((self.t + 1) ** 2) / self.delta) / np.log(1 / (1 - self.p))
+            np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
         )
 
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
+        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
-        chosen_action = -2
         count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
             pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
@@ -1137,33 +1127,10 @@ class BiRoLFLasso(ContextualBandit):
                 options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
             ).x.reshape(impute_shape)
 
-            ## compute and update the pseudo rewards
-            if self.matching:
-                for key in self.matching:
-                    matched, data_x, data_y, _, chosen, reward = self.matching[key]
-                    if matched:
-                        chosen_i, chosen_j = action_to_ij(chosen, self.N)
-                        new_pseudo_rewards = data_x @ Phi_impute @ data_y.T
-                        new_pseudo_rewards[chosen_i, chosen_j] += (
-                            (1 / self.p) * (
-                                reward
-                                - (data_x[chosen_i, :] @ Phi_impute @ data_y[chosen_j, :].T)
-                            )
-                        )
-
-                        # overwrite the value
-                        self.matching[key] = (
-                            matched,
-                            data_x,
-                            data_y,
-                            new_pseudo_rewards,
-                            chosen,
-                            reward,
-                        )
-
             ## compute the pseudo rewards for the current data
             pseudo_rewards = x @ Phi_impute @ y.T
             chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
+            # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
             w_now = 1.0 / max(self.p, 1e-12)
             pseudo_rewards[chosen_i, chosen_j] += w_now * (
                 r - (x[chosen_i, :] @ Phi_impute @ y[chosen_j, :].T)
@@ -1346,9 +1313,24 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self.Bbar_i = None     # list of (d_y,d_y)
         self.C_sum = np.zeros((self.M, self.N), dtype=float)
 
+        # main-stage caches for fast full-matrix FISTA
+        self.Gx = None
+        self.Gy = None
+        self.lam_x_max = None
+        self.lam_y_max = None
+        self.B_main_sum = np.zeros((self.M, self.N), dtype=float)
+        self.Gamma_main = 0
+        self._last_lam_main = None
+        self.impute_use_backtracking = False
+        self.x_norm2 = None
+        self.y_norm2 = None
+        self.Bbar_fro2 = None
+        self._L_imp_sum = 0.0
+
         # FISTA hyper-params
         self.fista_max_iter = 200
         self.fista_tol = 1e-6
+        self._arm_indices = np.arange(self.M * self.N)
 
     # ---------- utilities ----------
     @staticmethod
@@ -1393,12 +1375,31 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self.A_i = [np.outer(self.X_static[i, :], self.X_static[i, :]) for i in range(self.M)]
         self.B_j = [np.outer(self.Y_static[j, :], self.Y_static[j, :]) for j in range(self.N)]
         self.Bbar_i = [np.zeros((self.Y_static.shape[1], self.Y_static.shape[1])) for _ in range(self.M)]
+        self.x_norm2 = np.sum(self.X_static * self.X_static, axis=1)
+        self.y_norm2 = np.sum(self.Y_static * self.Y_static, axis=1)
+        self.Bbar_fro2 = np.zeros(self.M, dtype=float)
+        self._L_imp_sum = 0.0
+        # Precompute Gram matrices for the main objective.
+        self.Gx = self.X_static.T @ self.X_static
+        self.Gy = self.Y_static.T @ self.Y_static
+        self.lam_x_max = float(np.max(np.linalg.eigvalsh(self.Gx))) if self.Gx.size else 0.0
+        self.lam_y_max = float(np.max(np.linalg.eigvalsh(self.Gy))) if self.Gy.size else 0.0
         self._static_arms_initialized = True
 
     def _update_impute_caches(self, i: int, j: int, r: float) -> None:
         self.Ncnt[i, j] += 1
         self.Ssum[i, j] += r
         self.Ssq[i, j]  += r * r
+        if self.Bbar_fro2 is not None and self.x_norm2 is not None and self.y_norm2 is not None:
+            y = self.Y_static[j, :]
+            old_norm = np.sqrt(self.Bbar_fro2[i])
+            dot = float(y @ (self.Bbar_i[i] @ y))
+            self.Bbar_fro2[i] = max(
+                self.Bbar_fro2[i] + 2.0 * dot + (self.y_norm2[j] ** 2),
+                0.0,
+            )
+            new_norm = np.sqrt(self.Bbar_fro2[i])
+            self._L_imp_sum += self.x_norm2[i] * (new_norm - old_norm)
         self.Bbar_i[i] += self.B_j[j]
         self.C_sum += np.outer(self.X_static[i, :], self.Y_static[j, :]) * r
 
@@ -1419,6 +1420,8 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         return G
 
     def _impute_lipschitz_upper(self) -> float:
+        if self._L_imp_sum is not None:
+            return 2.0 * max(float(self._L_imp_sum), 1e-12)
         total = 0.0
         for i in range(self.M):
             LA = self._spectral_norm(self.A_i[i])
@@ -1528,21 +1531,23 @@ class BiRoLFLasso_FISTA(ContextualBandit):
         self._hat_history = getattr(self, "_hat_history", {})
         self._hat_history[self.t] = (i_hat, j_hat)
 
-        # pseudo / chosen sampling (resample chosen and pseudo until match or max_iter)
+        # pseudo / chosen sampling (fixed chosen; resample pseudo only up to rho_t)
         total_arms = self.M * self.N
-        max_iter = int(np.log(2 * ((self.t + 1) ** 2) / self.delta) / np.log(1 / (1 - self.p)))
+        denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
+        max_iter = int(
+            np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
+        )
 
         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        count = 0
+        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
         pseudo_action = -1
-        chosen_action = -2
+        count = 0
         while (pseudo_action != chosen_action) and (count <= max_iter):
-            chosen_action = np.random.choice(np.arange(total_arms), p=chosen_dist).item()
             pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
             pseudo_dist[chosen_action] = self.p
-            pseudo_action = np.random.choice(np.arange(total_arms), p=pseudo_dist).item()
+            pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
             count += 1
 
         self.pseudo_action = pseudo_action
@@ -1566,68 +1571,44 @@ class BiRoLFLasso_FISTA(ContextualBandit):
             (4 * self.sigma * kappa_x * kappa_y / self.p) *
             np.sqrt(2 * self.t * np.log(2 * self.M * self.N * (self.t ** 2) / self.delta))
         )
+        self._last_lam_main = lam_main
 
         if self.pseudo_action == self.chosen_action:
             self.reward_history.append(r)
             self._update_impute_caches(ci, cj, r)
             # ---- imputation: backtracking FISTA on smooth g_imp + l1 ----
             L_imp = self._impute_lipschitz_upper()
-            Phi_impute = self._fista_l1_backtracking(
-                self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
+            if self.impute_use_backtracking:
+                Phi_impute = self._fista_l1_backtracking(
+                    self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
+                )
+            else:
+                Phi_impute = self._fista_l1(
+                    self.impute_prev, lam_impute, self._grad_impute, L_imp
+                )
+
+            # current round pseudo-reward contribution to main sufficient stats
+            pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
+            alpha = (1.0 / max(self.p, 1e-12)) * (r - pred)
+            self.B_main_sum += (self.Gx @ Phi_impute @ self.Gy) + alpha * np.outer(
+                self.X_static[ci, :], self.Y_static[cj, :]
             )
-
-            # ---- update pseudo-rewards for all matched ----
-            if self.matching:
-                for key, tup in self.matching.items():
-                    matched, X_t, Y_t, R_t, chosen, rew = tup
-                    if not matched:
-                        continue
-                    mi, mj = action_to_ij(chosen, self.N)
-                    newR = X_t @ Phi_impute @ Y_t.T
-                    # importance weight: 1/p
-                    newR[mi, mj] += (1.0 / self.p) * (
-                        rew - (X_t[mi, :] @ Phi_impute @ Y_t[mj, :].T)
-                    )
-                    self.matching[key] = (matched, X_t, Y_t, newR, chosen, rew)
-
-            # current round pseudo-reward
-            R_now = x @ Phi_impute @ y.T
-            R_now[ci, cj] += (1.0 / self.p) * (
-                r - (x[ci, :] @ Phi_impute @ y[cj, :].T)
-            )
-            self.matching[self.t] = (True, x, y, R_now, self.chosen_action, r)
-
-            # ---- build lists for main-stage objective ----
-            X_list, Y_list, R_list = [], [], []
-            for key, tup in self.matching.items():
-                if tup[0]:
-                    X_list.append(tup[1]); Y_list.append(tup[2]); R_list.append(tup[3])
-
-            # gradient and smooth objective (no l1 inside!)
-            def _grad_main(Phi: np.ndarray) -> np.ndarray:
-                G = np.zeros_like(Phi)
-                for Xt, Yt, Rt in zip(X_list, Y_list, R_list):
-                    G += Xt.T @ (Xt @ Phi @ Yt.T) @ Yt - Xt.T @ Rt @ Yt
-                return 2.0 * G
-
-            def _g_main(Phi: np.ndarray) -> float:
-                loss = 0.0
-                for Xt, Yt, Rt in zip(X_list, Y_list, R_list):
-                    E = Rt - Xt @ Phi @ Yt.T
-                    loss += float(np.sum(E * E))
-                return loss  # (ℓ1는 외부에서만)
-
-            # Lipschitz estimate for the linear operator
-            L_lin = self._op_spectral_norm(
-                lambda W: self._op_apply_main(W, X_list, Y_list),
-                self.main_prev.shape, iters=30, tol=1e-6
-            )
-            L_main = 2.0 * max(L_lin, 1e-12)
-
-            # ---- main: backtracking FISTA ----
+            self.matching[self.t] = (True, None, None, None, self.chosen_action, r)
+            self.Gamma_main += 1
+            Gx_scaled = self.Gx * float(self.Gamma_main)
+            B_main = self.B_main_sum
+            L_main = 2.0 * max(self.lam_x_max, 1e-12) * max(self.lam_y_max, 1e-12) * float(self.Gamma_main)
             optimization_start_time = time.time()
-            Phi_main = self._fista_l1_backtracking(
-                self.main_prev, lam_main, _grad_main, _g_main, L0=L_main
+            Phi_main = fista_lasso_matrix(
+                Gx_scaled,
+                self.Gy,
+                B_main,
+                lam_main,
+                self.main_prev,
+                L_main,
+                self.fista_max_iter,
+                self.fista_tol,
+                use_fista=True,
             )
             optimization_time = time.time() - optimization_start_time
 
@@ -1664,6 +1645,17 @@ class BiRoLFLasso_FISTA(ContextualBandit):
 
     def __get_param(self):
         return {"param": self.Phi_hat, "impute": self.Phi_check}
+
+    def main_kkt_violation(self) -> float:
+        """
+        Return KKT residual for the last main update (0 means optimal up to tolerance).
+        """
+        if self.Gamma_main <= 0 or self.Gx is None or self.Gy is None:
+            return 0.0
+        if self._last_lam_main is None:
+            return 0.0
+        Gx_scaled = self.Gx * float(self.Gamma_main)
+        return kkt_residual_matrix(Gx_scaled, self.Gy, self.B_main_sum, self.Phi_hat, self._last_lam_main)
 
 
 def soft_threshold(Z: np.ndarray, tau: float) -> np.ndarray:
@@ -1756,6 +1748,31 @@ def fista_lasso_matrix(
         if ndiff <= tol * max(1.0, nrm):
             break
     return X
+
+
+def kkt_residual_matrix(
+    Gx: np.ndarray,
+    Gy: np.ndarray,
+    B: np.ndarray,
+    Phi: np.ndarray,
+    mu: float,
+    eps: float = 1e-12,
+) -> float:
+    """
+    KKT residual for matrix lasso:
+      min tr(Phi^T Gx Phi Gy) - 2 tr(B^T Phi) + mu ||Phi||_1
+    """
+    if Phi.size == 0:
+        return 0.0
+    grad = 2.0 * (Gx @ Phi @ Gy - B)
+    mask = np.abs(Phi) > eps
+    res_nz = 0.0
+    if np.any(mask):
+        res_nz = float(np.max(np.abs(grad[mask] + mu * np.sign(Phi[mask]))))
+    res_z = 0.0
+    if np.any(~mask):
+        res_z = float(np.max(np.maximum(np.abs(grad[~mask]) - mu, 0.0)))
+    return max(res_nz, res_z)
 
 
 # Batched ou solver: equivalent to independent column solves, but uses BLAS G @ X per step.
@@ -2025,6 +2042,7 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         self.kappa_x = None
         self.kappa_y = None
         self._block_caches_ready = False
+        self.impute_use_backtracking = False
 
     def _init_blockwise_caches(self, x: np.ndarray, y: np.ndarray) -> None:
         if self._block_caches_ready:
@@ -2077,11 +2095,17 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso_FISTA):
         self._update_impute_caches(ci, cj, r)
 
         L_imp = self._impute_lipschitz_upper()
-        Phi_impute = self._fista_l1_backtracking(
-            self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
-        )
+        if self.impute_use_backtracking:
+            Phi_impute = self._fista_l1_backtracking(
+                self.impute_prev, lam_impute, self._grad_impute, self._g_impute, L_imp
+            )
+        else:
+            Phi_impute = self._fista_l1(
+                self.impute_prev, lam_impute, self._grad_impute, L_imp
+            )
 
         pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
+        # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
         w_now = 1.0 / max(self.p, 1e-12)
         alpha = w_now * (r - pred)
 

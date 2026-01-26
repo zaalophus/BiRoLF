@@ -790,13 +790,17 @@ def plot_optimization_timing_comparison():
     
     # Add error bars (standard deviation)
     ax.errorbar(x_pos, times, yerr=errors, fmt='none', color='black', capsize=8, capthick=2, linewidth=2)
-    
+
     # Add shaded regions for standard deviation
     for i, (x, time_val, err) in enumerate(zip(x_pos, times, errors)):
         ax.fill_between([x-0.3, x+0.3], [time_val-err, time_val-err], [time_val+err, time_val+err], 
                        color=colors[i], alpha=0.2, label=f'±1σ {agents[i]}' if i < 2 else None)
     
     # Add value labels on bars
+    y_max = max(times)
+    err_max = max(errors) if errors else 0.0
+    top_pad = max(y_max * 0.2, err_max * 0.1, 1e-6)
+    ax.set_ylim(0.0, y_max + err_max + top_pad)
     for i, (bar, time_val, err) in enumerate(zip(bars, times, errors)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + err + max(times) * 0.02,
@@ -806,7 +810,7 @@ def plot_optimization_timing_comparison():
     ax.set_ylabel('Average Optimization Time (seconds)', fontsize=14, fontweight='bold')
     title_params = (
         f"Case_{cfg.case}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_"
-        f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}"
+        f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}"
     )
     ax.set_title(f'Optimization Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -821,7 +825,7 @@ def plot_optimization_timing_comparison():
     plt.tight_layout()
     
     # Generate filename with experiment parameters
-    fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}"
+    fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}"
     
     # Save plot
     os.makedirs(FIGURE_PATH, exist_ok=True)
@@ -922,7 +926,7 @@ def plot_total_execution_time_comparison():
     plt.tight_layout()
     
     # Generate filename with experiment parameters
-    fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}"
+    fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}"
     
     # Save plot
     os.makedirs(FIGURE_PATH, exist_ok=True)
