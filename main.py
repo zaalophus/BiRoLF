@@ -28,7 +28,7 @@ AGENT_DICT = {
     "dr_lasso": "DRLasso",
 }
 
-cfg = get_cfg()
+cfg = None
 
 def _maybe_set_blas_threads():
     if not getattr(cfg, "set_blas_threads", False):
@@ -57,14 +57,12 @@ lam_c_main_lin   = lam_c_main   if lam_c_main   is not None else 1.0
 lam_c_impute_bilin = lam_c_impute if lam_c_impute is not None else 1.0
 lam_c_main_bilin   = lam_c_main   if lam_c_main   is not None else 0.1
 
-date = datetime.datetime.now().strftime('%Y-%m-%d')
-RUN_TAG = dt.now().strftime("%H%M%S_%f")
+date = None
+RUN_TAG = None
 
-RESULT_PATH = f"{MOTHER_PATH}/results/{date}/seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-FIGURE_PATH = f"{MOTHER_PATH}/figures/{date}/seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-LOG_PATH = (
-    f"{MOTHER_PATH}/logs/{date}/seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-)
+RESULT_PATH = None
+FIGURE_PATH = None
+LOG_PATH = None
 
 # Global timing tracking variables
 TIMING_DATA = {}  # {agent_name: {trial: [optimization_times]}}
@@ -1191,7 +1189,33 @@ def plot_timing_analysis():
     print("Timing analysis plots and data saved successfully!")
 
 
-if __name__ == "__main__":
+def _init_worker(given_cfg, result_path, figure_path, log_path, run_tag):
+    global cfg, RESULT_PATH, FIGURE_PATH, LOG_PATH, RUN_TAG
+    cfg = given_cfg
+    RESULT_PATH = result_path
+    FIGURE_PATH = figure_path
+    LOG_PATH = log_path
+    RUN_TAG = run_tag
+    _maybe_set_blas_threads()
+
+def run_main(given_cfg = None):
+    global cfg, date, RUN_TAG, RESULT_PATH, FIGURE_PATH, LOG_PATH 
+
+    if given_cfg is None:
+        cfg = get_cfg()
+    else:
+        cfg = given_cfg
+    
+        
+    date = datetime.now().strftime('%Y-%m-%d')
+    RUN_TAG = dt.now().strftime("%H%M")
+
+    RESULT_PATH = f"{MOTHER_PATH}/results/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    FIGURE_PATH = f"{MOTHER_PATH}/figures/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    LOG_PATH = (
+        f"{MOTHER_PATH}/logs/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    )
+
     ##
     _maybe_set_blas_threads()
 
@@ -1233,7 +1257,9 @@ if __name__ == "__main__":
     if getattr(cfg, "sequential_benchmark", False):
         results = map(bilinear_run_agent, worker_args)
     else:
-        with ProcessPoolExecutor(max_workers=16) as executor:
+        with ProcessPoolExecutor(max_workers=16,
+                             initializer=_init_worker,
+                             initargs=(cfg, RESULT_PATH, FIGURE_PATH, LOG_PATH, RUN_TAG)) as executor:
             results = executor.map(bilinear_run_agent, worker_args)
 
     # Collect results and timing data
@@ -1343,6 +1369,8 @@ if __name__ == "__main__":
     plot_timing_analysis()
     print("All plots and results saved successfully!")
 
+if __name__ == "__main__":
+    run_main()
 #
 ###### ! BEFORE CHANGE ! #############
 #
