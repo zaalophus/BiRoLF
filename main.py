@@ -782,7 +782,7 @@ def bilinear_run_agent(args):
         noise_std=cfg.reward_std,
         case=cfg.case,
         verbose=True,
-        fname=f"Case_{cfg.case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}",
+        fname=f"Seed_{cfg.seed}_Case_{cfg.case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}",
         timing_data=local_timing_data  # Pass timing data container
     )
     
@@ -910,7 +910,7 @@ def plot_optimization_timing_comparison():
     plt.tight_layout()
     
     # Generate filename with experiment parameters
-    fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}"
+    fname_params = f"Seed_{cfg.seed}_M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}"
     
     # Save plot
     os.makedirs(FIGURE_PATH, exist_ok=True)
