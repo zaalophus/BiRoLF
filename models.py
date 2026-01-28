@@ -1347,6 +1347,10 @@ class BiRoLFLasso(ContextualBandit):
         theoretical_init_explore: bool = False,
         lam_c_impute: float = 1.0,
         lam_c_main: float = 1.0,
+        fista_max_iter: int = 200,
+        fista_tol: float = 1e-6,
+        kappa_cap: float = 0.0,
+        kappa_cap_percentile: float = 0.0,
     ):
         # --- tunable regularization multipliers ---
         self.lam_c_impute = lam_c_impute
@@ -1399,10 +1403,14 @@ class BiRoLFLasso(ContextualBandit):
         self.impute_use_backtracking = True
 
         # FISTA hyper-params
-        self.fista_max_iter = 200
-        self.fista_tol = 1e-6
+        self.fista_max_iter = int(fista_max_iter)
+        self.fista_tol = float(fista_tol)
+        self.kappa_cap = float(kappa_cap)
+        self.kappa_cap_percentile = float(kappa_cap_percentile)
         self._arm_indices = np.arange(self.M * self.N)
         self._profile_ops = False
+        self._kappa_x_cache = None
+        self._kappa_y_cache = None
 
     # ---------- utilities ----------
     @staticmethod
@@ -1449,6 +1457,9 @@ class BiRoLFLasso(ContextualBandit):
         self.Gy = self.Y_static.T @ self.Y_static
         self.lam_x_max = float(np.max(np.linalg.eigvalsh(self.Gx))) if self.Gx.size else 0.0
         self.lam_y_max = float(np.max(np.linalg.eigvalsh(self.Gy))) if self.Gy.size else 0.0
+        # Cache capped kappa values once (x,y are fixed per trial).
+        self._kappa_x_cache = self._compute_kappa(self.X_static)
+        self._kappa_y_cache = self._compute_kappa(self.Y_static)
         self._static_arms_initialized = True
 
     def _update_impute_caches(self, i: int, j: int, r: float) -> None:
@@ -1456,6 +1467,21 @@ class BiRoLFLasso(ContextualBandit):
         self.Ssum[i, j] += r
         self.Ssq[i, j]  += r * r
         self.C_sum += np.outer(self.X_static[i, :], self.Y_static[j, :]) * r
+
+    def _compute_kappa(self, X: np.ndarray) -> float:
+        if X.size == 0:
+            return 0.0
+        abs_x = np.abs(X)
+        kappa = float(np.max(abs_x))
+        cap = None
+        if self.kappa_cap_percentile and self.kappa_cap_percentile > 0.0:
+            pct = float(np.clip(self.kappa_cap_percentile, 0.0, 100.0))
+            cap = float(np.percentile(abs_x, pct))
+        if self.kappa_cap and self.kappa_cap > 0.0:
+            cap = self.kappa_cap if cap is None else min(cap, self.kappa_cap)
+        if cap is not None:
+            kappa = min(kappa, cap)
+        return kappa
 
     # ---- impute smooth part: g_imp(Φ) and ∇g_imp(Φ) ----
     def _g_impute(self, Phi: np.ndarray) -> float:
@@ -1645,8 +1671,8 @@ class BiRoLFLasso(ContextualBandit):
         ci, cj = action_to_ij(self.chosen_action, self.N)
 
         # --- lambdas (BiRoLF-Lasso와 동일 스케일) ---
-        kappa_x = np.max(np.abs(x))
-        kappa_y = np.max(np.abs(y))
+        kappa_x = self._kappa_x_cache if self._kappa_x_cache is not None else self._compute_kappa(x)
+        kappa_y = self._kappa_y_cache if self._kappa_y_cache is not None else self._compute_kappa(y)
         lam_impute = self.lam_c_impute * (
             2 * self.sigma * kappa_x * kappa_y *
             np.sqrt(2 * self.t * np.log(2 * self.M * self.N * (self.t ** 2) / self.delta))
@@ -1655,6 +1681,7 @@ class BiRoLFLasso(ContextualBandit):
             (4 * self.sigma * kappa_x * kappa_y / self.p) *
             np.sqrt(2 * self.t * np.log(2 * self.M * self.N * (self.t ** 2) / self.delta))
         )
+        self._last_lam_main = lam_main
         self._last_lam_main = lam_main
 
         if self.pseudo_action == self.chosen_action:
@@ -2195,6 +2222,10 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
         theoretical_init_explore: bool = False,
         lam_c_impute: float = 1.0,
         lam_c_main: float = 1.0,
+        fista_max_iter: int = 200,
+        fista_tol: float = 1e-6,
+        kappa_cap: float = 0.0,
+        kappa_cap_percentile: float = 0.0,
         block_oo_max_iter: int = 100,
         block_ou_max_iter: int = 50,
         block_uo_max_iter: int = 50,
@@ -2215,6 +2246,10 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
             theoretical_init_explore=theoretical_init_explore,
             lam_c_impute=lam_c_impute,
             lam_c_main=lam_c_main,
+            fista_max_iter=fista_max_iter,
+            fista_tol=fista_tol,
+            kappa_cap=kappa_cap,
+            kappa_cap_percentile=kappa_cap_percentile,
         )
         self.dx = int(d_x)
         self.dy = int(d_y)
@@ -2241,6 +2276,7 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
         self._block_caches_ready = False
         self.impute_use_backtracking = True
         self._profile_ops = False
+        self._last_lam_main = None
 
     def _init_blockwise_caches(self, x: np.ndarray, y: np.ndarray) -> None:
         if self._block_caches_ready:
@@ -2265,9 +2301,9 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
             self.G_Yo = np.zeros((0, 0), dtype=float)
             self.lam_y_max = 0.0
 
-        # Paper: kappa_max is max absolute entry in augmented features.
-        self.kappa_x = float(np.max(np.abs(x))) if x.size else 0.0
-        self.kappa_y = float(np.max(np.abs(y))) if y.size else 0.0
+        # Paper: kappa_max is max absolute entry in augmented features (optionally capped).
+        self.kappa_x = self._compute_kappa(x)
+        self.kappa_y = self._compute_kappa(y)
         self._block_caches_ready = True
 
     def update(self, x: np.ndarray, y: np.ndarray, r: float):
@@ -2409,6 +2445,17 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
         self.Phi_check = Phi_impute
         self.impute_prev = Phi_impute
         self.main_prev = Phi_main
+
+    def main_kkt_violation(self) -> float:
+        """
+        KKT residual for blockwise main objective.
+        """
+        if self.Gamma <= 0 or self._last_lam_main is None:
+            return 0.0
+        Gx = build_augmented_gram(self.G_Xo, self.M, self.dx)
+        Gy = build_augmented_gram(self.G_Yo, self.N, self.dy)
+        mu = self._last_lam_main / float(self.Gamma)
+        return kkt_residual_matrix(Gx, Gy, self.B, self.Phi_hat, mu)
 
 
 class LowOFUL(ContextualBandit):

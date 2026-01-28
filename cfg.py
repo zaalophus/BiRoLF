@@ -96,6 +96,11 @@ def get_cfg():
     parser.add_argument("--timing_log_every", type=int, default=0)
     parser.add_argument("--profile_ops", type=str2bool, default=False)
     parser.add_argument("--profile_ops_log_every", type=int, default=0)
+    parser.add_argument("--bi_fista_max_iter", type=int, default=200)
+    parser.add_argument("--bi_fista_tol", type=float, default=1e-6)
+    parser.add_argument("--kkt_log_every", type=int, default=0)
+    parser.add_argument("--kappa_cap", type=float, default=0.0)
+    parser.add_argument("--kappa_cap_percentile", type=float, default=0.0)
 
     cfg = parser.parse_args()
     if cfg.p1 is None:

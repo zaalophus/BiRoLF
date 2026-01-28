@@ -368,6 +368,10 @@ def bilinear_run_trial(
                 theoretical_init_explore=False,
                 lam_c_impute=cfg.lamc_bi_impute,
                 lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
             )
         else:
             agent = BiRoLFLasso(
@@ -381,6 +385,10 @@ def bilinear_run_trial(
                 theoretical_init_explore=False,
                 lam_c_impute=cfg.lamc_bi_impute,
                 lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
             )
 
     elif agent_type == "birolf_lasso_blockwise":
@@ -400,6 +408,10 @@ def bilinear_run_trial(
                 theoretical_init_explore=False,
                 lam_c_impute=cfg.lamc_bi_impute,
                 lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
                 block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
                 block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
                 block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
@@ -421,6 +433,10 @@ def bilinear_run_trial(
                 theoretical_init_explore=False,
                 lam_c_impute=cfg.lamc_bi_impute,
                 lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
                 block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
                 block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
                 block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
@@ -681,6 +697,18 @@ def bilinear_run(
                     f"overhead={overhead:.6e}s"
                 )
                 save_log(path=LOG_PATH, fname=fname, string=log_msg)
+
+        # KKT logging for BiRoLF main objectives
+        kkt_every = int(getattr(cfg, "kkt_log_every", 0) or 0)
+        if kkt_every > 0 and ((t + 1) % kkt_every == 0):
+            kkt_val = None
+            if hasattr(agent, "main_kkt_violation"):
+                try:
+                    kkt_val = float(agent.main_kkt_violation())
+                except Exception:
+                    kkt_val = None
+            if kkt_val is not None:
+                save_log(path=LOG_PATH, fname=fname, string=f"KKT round={t+1} agent={agent.__class__.__name__} kkt={kkt_val:.6e}")
         
         # Store total update time (not just lasso optimization time)
         # The lasso optimization timing is handled separately in models.py
