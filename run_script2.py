@@ -79,10 +79,10 @@ if __name__ == "__main__":
     # run_main(now_script.cfg)
     
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
-    for seed in [2121,4343]:
-        for true_dim in [20,15]:
-            for num_arm in [18,25]:
-                for dim in [10]:
+    for seed in [123]:
+        for true_dim in [12]:
+            for num_arm in [20]:
+                for dim in [6]:
                     for case in [1,2,4,5]:
                         if true_dim - num_arm < dim and dim < num_arm and true_dim > dim:
                             now_script = Script(cfg,

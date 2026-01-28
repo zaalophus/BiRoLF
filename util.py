@@ -443,6 +443,8 @@ def param_generator(
     bound_type: str = None,
     uniform_rng: list = None,
     random_state: int = None,
+    param_sparsity: float = 0.0,
+    sparse_mode: str = "bernoulli",
 ):
     ## Function that generates an unknown parameter
     assert distribution.lower() in [
@@ -471,7 +473,25 @@ def param_generator(
             L = np.linalg.cholesky(pd)
             param = L @ param
 
-    if bound is not None:
+    # Apply sparsity if requested
+    if param_sparsity and param_sparsity > 0.0:
+        s = float(np.clip(param_sparsity, 0.0, 1.0))
+        if sparse_mode == "topk":
+            k = int(np.ceil((1.0 - s) * param.size))
+            if k <= 0:
+                param = np.zeros_like(param)
+            else:
+                flat = param.reshape(-1)
+                idx = np.argpartition(np.abs(flat), -k)[-k:]
+                mask = np.zeros_like(flat)
+                mask[idx] = 1.0
+                param = (flat * mask).reshape(param.shape)
+        else:
+            rng = np.random.default_rng(random_state)
+            mask = (rng.random(size=param.shape) > s).astype(float)
+            param = param * mask
+
+    if bound is not None and bound_type is not None:
         assert bound_type in [
             "l1",
             "l2",
@@ -490,6 +510,8 @@ def bilinear_param_generator(
     bound_type: str = None,
     uniform_rng: list = None,
     random_state: int = None,
+    param_sparsity: float = 0.0,
+    sparse_mode: str = "bernoulli",
 ):
     ## Function that generates an unknown parameter
     assert distribution.lower() in [
@@ -509,18 +531,35 @@ def bilinear_param_generator(
             param = generate_uniform(
                 dim=(dimension_x, dimension_y), uniform_rng=uniform_rng
             )
-    ## TODO: make non-disjoint situation
     else:
-        pass
-        # if distribution == "gaussian":
-        #     cov = covariance_generator(dimension, distribution=distribution)
-        #     param = np.random.multivariate_normal(mean=np.zeros(dimension), cov=cov)
-        # else:
-        #     # uniform
-        #     param = generate_uniform(dim=dimension, uniform_rng=uniform_rng)
-        #     pd = positive_definite_generator(dimension, distribution=distribution)
-        #     L = np.linalg.cholesky(pd)
-        #     param = L @ param
+        raise NotImplementedError("Non-disjoint bilinear parameters are not implemented.")
+    # Apply sparsity if requested
+    if param_sparsity and param_sparsity > 0.0:
+        s = float(np.clip(param_sparsity, 0.0, 1.0))
+        if sparse_mode == "topk":
+            k = int(np.ceil((1.0 - s) * param.size))
+            if k <= 0:
+                param = np.zeros_like(param)
+            else:
+                flat = param.reshape(-1)
+                idx = np.argpartition(np.abs(flat), -k)[-k:]
+                mask = np.zeros_like(flat)
+                mask[idx] = 1.0
+                param = (flat * mask).reshape(param.shape)
+        else:
+            rng = np.random.default_rng(random_state)
+            mask = (rng.random(size=param.shape) > s).astype(float)
+            param = param * mask
+
+    if bound is not None and bound_type is not None:
+        assert bound_type in [
+            "l1",
+            "l2",
+            "lsup",
+        ], "Bounding type must be one of 'l1', 'l2', 'lsup'."
+        param = bounding(type="param", v=param, bound=bound, norm_type=bound_type)
+
+    # TODO: make non-disjoint situation if needed in the future.
 
     ## TODO: make bounding for parameter matrix Phi
     ## This is bounding for the linear one.
@@ -537,7 +576,7 @@ def bilinear_param_generator(
 
 def save_plot(fig: Figure, path: str, time_check:dict, fname: str, extension: str = "pdf"):
     os.makedirs(path, exist_ok=True)
-    fig.savefig(f"{path}/{fname}.{extension}")
+    fig.savefig(f"{path}/{fname}.{extension}", bbox_inches="tight")
     if extension != "png":
         fig.savefig(f"{path}/{fname}.png", dpi=300, bbox_inches="tight")
     

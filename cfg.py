@@ -61,6 +61,9 @@ def get_cfg():
     parser.add_argument("--param_bound_type", "-PBT", type=str, choices=["l1", "l2", "lsup"])
     parser.add_argument("--param_uniform_rng", "-PUR", type=float, default=None, nargs=2)
     parser.add_argument("--param_disjoint", action="store_true")
+    parser.add_argument("--param_sparsity", type=float, default=0.0,
+                        help="Fraction of zeros in parameter (0.0= dense, 1.0=all zeros)")
+    parser.add_argument("--param_sparse_mode", type=str, choices=["bernoulli", "topk"], default="bernoulli")
     
     parser.add_argument("--save_param", action="store_true")
     parser.add_argument("--filetype", type=str, choices=["pickle", "json"], default="pickle")
@@ -80,9 +83,9 @@ def get_cfg():
                         help="Scale for BiRoLF (Lasso/FISTA) main lambda")
 
     # --- Blockwise main solver options ---
-    parser.add_argument("--block_oo_max_iter", type=int, default=100)
-    parser.add_argument("--block_ou_max_iter", type=int, default=50)
-    parser.add_argument("--block_uo_max_iter", type=int, default=50)
+    parser.add_argument("--block_oo_max_iter", type=int, default=200)
+    parser.add_argument("--block_ou_max_iter", type=int, default=200)
+    parser.add_argument("--block_uo_max_iter", type=int, default=200)
     parser.add_argument("--block_tol", type=float, default=1e-6)
     parser.add_argument("--block_use_fista", type=str2bool, default=True)
     parser.add_argument("--block_use_batched", type=str2bool, default=True)

@@ -19,11 +19,11 @@ AGENT_DICT = {
     "mab_ucb": r"UCB($\delta$)",
     "linucb": "LinUCB",
     "lints": "LinTS",
-    "rolf_lasso": "RoLF-Lasso",
+    "rolf_lasso": "RoLF",
     "rolf_ridge": "RoLF-Ridge",
     "birolf_lasso_old": "BiRoLF-Lasso-Old",
-    "birolf_lasso": "BiRoLF-Lasso (Ours)",
-    "birolf_lasso_blockwise": "BiRoLF-Lasso-Blockwise (Ours)",
+    "birolf_lasso": "BiRoLF w/o Blockwise (Ours)",
+    "birolf_lasso_blockwise": "BiRoLF (Ours)",
     "estr_lowoful": "ESTR+LowOFUL",
     "dr_lasso": "DRLasso",
 }
@@ -487,6 +487,8 @@ def bilinear_run_trial(
         bound=cfg.param_bound,
         bound_type=cfg.param_bound_type,
         uniform_rng=cfg.param_uniform_rng,
+        param_sparsity=getattr(cfg, "param_sparsity", 0.0),
+        sparse_mode=getattr(cfg, "param_sparse_mode", "bernoulli"),
     )
 
     ## (M,N) matrix with the maximum absolute value does not exceed 1
@@ -720,38 +722,78 @@ def bilinear_run(
 def bilinear_show_result(
     regrets: dict, horizon: int, figsize: tuple = (6, 5), fontsize=11
 ):
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=(7, 5))
 
     colors = ["blue", "orange", "green", "red", "purple", "black", "brown", "olive", "cyan"]
     period = horizon // 10
 
     z_init = len(colors)
     # Plot the graph for each algorithm with error bars
-    for i, (color, (key, item)) in enumerate(zip(colors, regrets.items())):
+    filtered = [
+        (k, v)
+        for k, v in regrets.items()
+        if k not in {"BiRoLF w/o Blockwise (Ours)", "RoLF-Ridge"}
+    ]
+    style_map = {
+        "BiRoLF (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 8},
+        "BiRoLF w/o Blockwise (Ours)": {"marker": "^", "linestyle": "--", "alpha": 1.0, "z": 7},
+        "RoLF": {"marker": "o", "linestyle": "-", "alpha": 1.0, "z": 6},
+        "RoLF-Ridge": {"marker": "D", "linestyle": "-.", "alpha": 1.0, "z": 5},
+        "DRLasso": {"marker": "X", "linestyle": "-", "alpha": 1.0, "z": 4},
+        "LinUCB": {"marker": "P", "linestyle": "-", "alpha": 1.0, "z": 3},
+        "LinTS": {"marker": "v", "linestyle": "-", "alpha": 1.0, "z": 2},
+        "UCB(δ)": {"marker": "*", "linestyle": "-", "alpha": 1.0, "z": 1},
+    }
+
+    for i, (color, (key, item)) in enumerate(zip(colors, filtered)):
         rounds = np.arange(horizon)
         mean = np.mean(item, axis=0)
-        std = np.std(item, axis=0, ddof=1)
+        if item.shape[0] > 1:
+            std = np.std(item, axis=0, ddof=1)
+        else:
+            std = np.zeros_like(mean)
+        style = style_map.get(key, {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 1})
 
-        # Display the line with markers and error bars periodically
+        # Display the line with markers and error bars periodically (offset per algorithm)
+        marker_offset = i % max(1, period)
+        marker_idx = rounds[marker_offset::period]
         ax.errorbar(
-            rounds[::period],
-            mean[::period],
-            yerr=std[::period],
+            marker_idx,
+            mean[marker_idx],
+            yerr=std[marker_idx],
             label=f"{key}",
-            fmt="s",
+            fmt=style["marker"],
             color=color,
+            linestyle="None",
             capsize=3,
             elinewidth=1,
-            zorder=z_init - i,
+            markeredgecolor="black",
+            markeredgewidth=0.6,
+            alpha=style["alpha"],
+            zorder=style["z"],
         )
 
         # Display the full line without periodic markers
-        ax.plot(rounds, mean, color=color, linewidth=2, zorder=z_init - i)
+        ax.plot(
+            rounds,
+            mean,
+            color=color,
+            linewidth=2,
+            linestyle=style["linestyle"],
+            alpha=style["alpha"],
+            zorder=style["z"],
+        )
 
     ax.grid(True)
     ax.set_xlabel(r"Round ($t$)")
     ax.set_ylabel("Cumulative Regret")
-    ax.legend(loc="upper left", fontsize=fontsize)
+    # Place legend inside top-left with smaller font
+    ax.legend(
+        loc="upper left",
+        fontsize=max(9, fontsize - 2),
+        frameon=True,
+        framealpha=0.85,
+    )
 
     fig.tight_layout()
     return fig
@@ -823,25 +865,25 @@ def plot_optimization_timing_comparison():
 
     agent_order = [
         "RoLFLasso",
-        "BiRoLFLasso_old",
         "BiRoLFLasso",
         "BiRoLFLasso_Blockwise",
     ]
     display_names = {
-        "RoLFLasso": "RoLF-Lasso",
-        "BiRoLFLasso_old": "BiRoLF-Lasso-Old",
-        "BiRoLFLasso": "BiRoLF-Lasso (Ours)",
-        "BiRoLFLasso_Blockwise": "BiRoLF-Lasso-Blockwise",
+        "RoLFLasso": "RoLF",
+        "BiRoLFLasso": "BiRoLF w/o Blockwise (Ours)",
+        "BiRoLFLasso_Blockwise": "BiRoLF (Ours)",
     }
 
     for agent_name in agent_order:
         if agent_name in TIMING_DATA:
-            all_times = []
+            per_trial_sums = []
             for trial_times in TIMING_DATA[agent_name].values():
-                all_times.extend(trial_times)
-            if all_times:
-                avg_times[agent_name] = np.mean(all_times)
-                std_times[agent_name] = np.std(all_times)
+                valid = [t for t in trial_times if np.isfinite(t) and t > 0.0]
+                if valid:
+                    per_trial_sums.append(float(np.sum(valid)))
+            if per_trial_sums:
+                avg_times[agent_name] = np.mean(per_trial_sums)
+                std_times[agent_name] = np.std(per_trial_sums)
 
     if not avg_times:
         print("No optimization timing data to plot.")
@@ -872,13 +914,14 @@ def plot_optimization_timing_comparison():
 
     # Add shaded regions for standard deviation (show legend for all agents)
     for i, (x, time_val, err) in enumerate(zip(x_pos, times, errors)):
+        legend_name = display_names.get(agents[i], agents[i])
         ax.fill_between(
             [x - 0.3, x + 0.3],
             [time_val - err, time_val - err],
             [time_val + err, time_val + err],
             color=colors[i],
             alpha=0.2,
-            label=f'±1σ {agents[i]}',
+            label=f'±1σ {legend_name}',
         )
     
     # Add value labels on bars
@@ -889,15 +932,15 @@ def plot_optimization_timing_comparison():
     for i, (bar, time_val, err) in enumerate(zip(bars, times, errors)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + err + max(times) * 0.02,
-                f'{time_val:.6f}s\n±{err:.6f}s', ha='center', va='bottom', 
+                f'{time_val:.3f}s\n±{err:.3f}s', ha='center', va='bottom', 
                 fontweight='bold', fontsize=11)
     
-    ax.set_ylabel('Average Optimization Time (seconds)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Total Optimization Time per Trial (seconds)', fontsize=14, fontweight='bold')
     title_params = (
         f"Case_{cfg.case}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_"
         f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}"
     )
-    ax.set_title(f'Optimization Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
+    ax.set_title('Optimization Time Comparison', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
     
     # Make agent names more readable
@@ -920,114 +963,100 @@ def plot_optimization_timing_comparison():
     
     # Print summary
     print("\n" + "="*60)
-    print("OPTIMIZATION TIMING COMPARISON SUMMARY")
+    print("OPTIMIZATION TIMING COMPARISON SUMMARY (PER-TRIAL TOTAL)")
     print("="*60)
     for agent_name in agents:
-        print(f"{agent_name}: {avg_times[agent_name]:.6f} ± {std_times[agent_name]:.6f} seconds")
+        print(f"{agent_name}: {avg_times[agent_name]:.3f} ± {std_times[agent_name]:.3f} seconds")
     print("="*60)
 
 
 def plot_total_execution_time_comparison():
-    """Plot total execution time comparison across all algorithms"""
+    """Plot total execution time comparison (RoLF and BiRoLF variants only)."""
     if not TOTAL_EXECUTION_TIMES:
         print("No total execution time data available.")
         return
-    
-    # Calculate statistics
+
+    # Only keep requested algorithms (display names)
+    keep_agents = [
+        "RoLF",
+        "BiRoLF w/o Blockwise (Ours)",
+        "BiRoLF (Ours)",
+    ]
+
     avg_times = {}
     std_times = {}
-    
     for agent_name, times in TOTAL_EXECUTION_TIMES.items():
-        if times:
+        if agent_name in keep_agents and times:
             avg_times[agent_name] = np.mean(times)
             std_times[agent_name] = np.std(times)
-    
+
     if not avg_times:
         print("No execution time data to plot.")
         return
-    
-    # Sort by average time for better visualization
-    sorted_agents = sorted(avg_times.keys(), key=lambda x: avg_times[x])
-    
-    # Create horizontal bar plot for better readability
-    fig, ax = plt.subplots(figsize=(14, 10))
-    
-    y_pos = np.arange(len(sorted_agents))
-    times = [avg_times[agent] for agent in sorted_agents]
-    errors = [std_times[agent] for agent in sorted_agents]
-    
-    # Color only BiRoLF-Lasso and BiRoLF-Lasso-Blockwise; keep others gray
-    colors = []
-    edge_colors = []
-    for agent in sorted_agents:
-        if "BiRoLF-Lasso-Blockwise" in agent:
-            colors.append('#4472C4')  # Blue for BiRoLF-Lasso-Blockwise
-            edge_colors.append('#1E40AF')
-        elif "BiRoLF-Lasso" in agent:
-            colors.append('#E15759')  # Red for BiRoLF-Lasso (Ours)
-            edge_colors.append('#B91C1C')
-        else:
-            colors.append('#A5A5A5')  # Gray for others
-            edge_colors.append('#6B7280')
-    
-    # Main bars
-    bars = ax.barh(y_pos, times, color=colors, alpha=0.8, edgecolor=edge_colors, linewidth=1.5, height=0.6)
-    
-    # Add error bars (standard deviation)
-    ax.errorbar(times, y_pos, xerr=errors, fmt='none', color='black', capsize=5, capthick=1.5, linewidth=1.5)
-    
-    # Add shaded regions for standard deviation
-    for i, (y, time_val, err, color) in enumerate(zip(y_pos, times, errors, colors)):
-        ax.fill_betweenx([y-0.3, y+0.3], [time_val-err, time_val-err], [time_val+err, time_val+err], 
-                        color=color, alpha=0.2)
-    
-    # Add value labels with improved formatting
-    for i, (bar, time_val, err) in enumerate(zip(bars, times, errors)):
-        width = bar.get_width()
-        ax.text(width + err + max(times) * 0.02, bar.get_y() + bar.get_height()/2.,
-                f'{time_val:.3f}s ± {err:.3f}s', ha='left', va='center', 
-                fontweight='bold', fontsize=10)
-    
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([AGENT_DICT.get(agent, agent) for agent in sorted_agents], fontsize=11)
-    ax.set_xlabel('Total Execution Time per Trial (seconds)', fontsize=14, fontweight='bold')
-    title_params = (
-        f"Case_{cfg.case}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_"
-        f"dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}"
-    )
-    ax.set_title(f'Total Execution Time Comparison\n{title_params}', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='x', linestyle='--')
-    
-    # Highlight only BiRoLF-Lasso and BiRoLF-Lasso-Blockwise
-    for i, agent in enumerate(sorted_agents):
-        if "BiRoLF-Lasso-Blockwise" in agent:
-            ax.get_yticklabels()[i].set_weight('bold')
-            ax.get_yticklabels()[i].set_color('#4472C4')
-        elif "BiRoLF-Lasso" in agent:
-            ax.get_yticklabels()[i].set_weight('bold')
-            ax.get_yticklabels()[i].set_color('#E15759')
-    
+
+    # Use same palette as Optimization Time Comparison
+    palette = {
+        "RoLF": "#6B7280",
+        "BiRoLF w/o Blockwise (Ours)": "#E15759",
+        "BiRoLF (Ours)": "#59A14F",
+    }
+
+    agents = [a for a in keep_agents if a in avg_times]
+    times = [avg_times[a] for a in agents]
+    errors = [std_times.get(a, 0.0) for a in agents]
+    colors = [palette.get(a, "#A5A5A5") for a in agents]
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    x_pos = np.arange(len(agents))
+
+    bars = ax.bar(x_pos, times, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5, width=0.6)
+    ax.errorbar(x_pos, times, yerr=errors, fmt='none', color='black', capsize=8, capthick=2, linewidth=2)
+
+    # Shaded ±1σ regions (match optimization time plot style)
+    for i, (x, time_val, err) in enumerate(zip(x_pos, times, errors)):
+        ax.fill_between(
+            [x - 0.3, x + 0.3],
+            [time_val - err, time_val - err],
+            [time_val + err, time_val + err],
+            color=colors[i],
+            alpha=0.2,
+            label=f'±1σ {agents[i]}',
+        )
+
+    y_max = max(times)
+    err_max = max(errors) if errors else 0.0
+    top_pad = max(y_max * 0.2, err_max * 0.1, 1e-6)
+    ax.set_ylim(0.0, y_max + err_max + top_pad)
+
+    for bar, time_val, err in zip(bars, times, errors):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + err + max(times) * 0.02,
+                f'{time_val:.3f}s ± {err:.3f}s', ha='center', va='bottom',
+                fontweight='bold', fontsize=11)
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(agents, fontsize=12)
+    ax.set_ylabel('Total Execution Time per Trial (seconds)', fontsize=14, fontweight='bold')
+    ax.set_title('Total Execution Time Comparison', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    # Legend to match Optimization Time Comparison style
+    ax.legend(loc='upper right', framealpha=0.9)
+
     plt.tight_layout()
-    
-    # Generate filename with experiment parameters
+
     fname_params = f"M_{cfg.arm_x}_N_{cfg.arm_y}_T_{cfg.horizon}_trials_{cfg.trials}_seed_{cfg.seed}_run_{RUN_TAG}"
-    
-    # Save plot
     os.makedirs(FIGURE_PATH, exist_ok=True)
     plt.savefig(f"{FIGURE_PATH}/total_execution_time_comparison_{fname_params}.png", dpi=300, bbox_inches='tight')
     plt.savefig(f"{FIGURE_PATH}/total_execution_time_comparison_{fname_params}.pdf", bbox_inches='tight')
     plt.show()
-    
-    # Print summary
+
     print("\n" + "="*80)
     print("TOTAL EXECUTION TIME COMPARISON SUMMARY")
     print("="*80)
-    print(f"{'Algorithm':<25} {'Avg Time (s)':<15} {'Std Time (s)':<15} {'Trials':<10}")
-    print("-"*80)
-    for agent_name in sorted_agents:
-        agent_display = AGENT_DICT.get(agent_name, agent_name)
-        n_trials = len(TOTAL_EXECUTION_TIMES[agent_name])
-        print(f"{agent_display:<25} {avg_times[agent_name]:<15.3f} {std_times[agent_name]:<15.3f} {n_trials:<10}")
+    for agent_name in agents:
+        n_trials = len(TOTAL_EXECUTION_TIMES.get(agent_name, []))
+        print(f"{agent_name:<35} {avg_times[agent_name]:<15.3f} {std_times[agent_name]:<15.3f} {n_trials:<10}")
     print("="*80)
 
 
@@ -1148,20 +1177,22 @@ def save_timing_data():
     # Calculate statistics
     timing_stats = {}
     
-    # Optimization timing statistics
+    # Optimization timing statistics (per-trial sums)
     for agent_name in TIMING_DATA:
-        all_times = []
+        per_trial_sums = []
         for trial_times in TIMING_DATA[agent_name].values():
-            all_times.extend(trial_times)
-        
-        if all_times:
+            valid = [t for t in trial_times if np.isfinite(t) and t > 0.0]
+            if valid:
+                per_trial_sums.append(float(np.sum(valid)))
+
+        if per_trial_sums:
             timing_stats[agent_name] = {
                 'optimization': {
-                    'mean': np.mean(all_times),
-                    'std': np.std(all_times),
-                    'min': np.min(all_times),
-                    'max': np.max(all_times),
-                    'count': len(all_times)
+                    'mean': np.mean(per_trial_sums),
+                    'std': np.std(per_trial_sums),
+                    'min': np.min(per_trial_sums),
+                    'max': np.max(per_trial_sums),
+                    'count': len(per_trial_sums)
                 }
             }
     
@@ -1265,7 +1296,6 @@ def run_main(given_cfg = None):
         "birolf_lasso",
         "birolf_lasso_blockwise",
         "rolf_lasso",
-        "rolf_ridge",
         "dr_lasso",
         "linucb",
         "lints",

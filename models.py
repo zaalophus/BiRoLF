@@ -1712,14 +1712,17 @@ class BiRoLFLasso(ContextualBandit):
             if impute_stats is not None:
                 self._last_impute_iters = int(impute_stats.get("iters", 0))
 
-            # current round pseudo-reward contribution to main sufficient stats
-            pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
-            alpha = (1.0 / max(self.p, 1e-12)) * (r - pred)
-            self.B_main_sum += (self.Gx @ Phi_impute @ self.Gy) + alpha * np.outer(
-                self.X_static[ci, :], self.Y_static[cj, :]
+            # Recompute main sufficient statistics with current Phi_impute (paper's pseudo-reward update).
+            self.Gamma_main += 1
+            S = self.X_static @ Phi_impute @ self.Y_static.T
+            Z = self.Ncnt * S
+            term_x = self.X_static.T @ Z @ self.Y_static
+            self.B_main_sum = (
+                float(self.Gamma_main) * (self.Gx @ Phi_impute @ self.Gy)
+                + (1.0 / max(self.p, 1e-12)) * self.C_sum
+                - (1.0 / max(self.p, 1e-12)) * term_x
             )
             self.matching[self.t] = (True, None, None, None, self.chosen_action, r)
-            self.Gamma_main += 1
             Gx_scaled = self.Gx * float(self.Gamma_main)
             B_main = self.B_main_sum
             L_main = 2.0 * max(self.lam_x_max, 1e-12) * max(self.lam_y_max, 1e-12) * float(self.Gamma_main)
@@ -2357,51 +2360,20 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
         if impute_stats is not None:
             self._last_impute_iters = int(impute_stats.get("iters", 0))
 
-        pred = float(x[ci, :] @ Phi_impute @ y[cj, :].T)
-        # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
-        w_now = 1.0 / max(self.p, 1e-12)
-        alpha = w_now * (r - pred)
+        # Recompute B_t with current Phi_impute (paper's pseudo-reward update).
+        self.Gamma = int(np.sum(self.Ncnt))
+        if self.Gamma <= 0:
+            return
+        S = self.X_static @ Phi_impute @ self.Y_static.T
+        Z = self.Ncnt * S
+        term_x = self.X_static.T @ Z @ self.Y_static
+        self.B = (
+            (self.Gx @ Phi_impute @ self.Gy)
+            + (1.0 / max(self.p, 1e-12)) * (self.C_sum / float(self.Gamma))
+            - (1.0 / max(self.p, 1e-12)) * (term_x / float(self.Gamma))
+        )
 
-        # Rank-1 correction per matched round without materializing full R_t.
         dx, dy = self.dx, self.dy
-        Phi = Phi_impute
-        Phi_oo = Phi[:dx, :dy]
-        Phi_ou = Phi[:dx, dy:]
-        Phi_uo = Phi[dx:, :dy]
-        Phi_uu = Phi[dx:, dy:]
-
-        T_oo = self.G_Xo @ Phi_oo @ self.G_Yo if dx > 0 and dy > 0 else np.zeros((dx, dy))
-        T_ou = self.G_Xo @ Phi_ou if dx > 0 else np.zeros((dx, self.N - dy))
-        T_uo = Phi_uo @ self.G_Yo if dy > 0 else np.zeros((self.M - dx, dy))
-        T_uu = Phi_uu if (self.M - dx) > 0 and (self.N - dy) > 0 else np.zeros((self.M - dx, self.N - dy))
-
-        x_o = x[ci, :dx]
-        x_u = x[ci, dx:]
-        y_o = y[cj, :dy]
-        y_u = y[cj, dy:]
-        O_oo = np.outer(x_o, y_o)
-        O_ou = np.outer(x_o, y_u)
-        O_uo = np.outer(x_u, y_o)
-        O_uu = np.outer(x_u, y_u)
-
-        S_oo = T_oo + alpha * O_oo
-        S_ou = T_ou + alpha * O_ou
-        S_uo = T_uo + alpha * O_uo
-        S_uu = T_uu + alpha * O_uu
-
-        # Online averages for B_t without full-matrix division.
-        self.Gamma += 1
-        inv_gamma = 1.0 / float(self.Gamma)
-        self.B[:dx, :dy] += (S_oo - self.B[:dx, :dy]) * inv_gamma
-        self.B[:dx, dy:] += (S_ou - self.B[:dx, dy:]) * inv_gamma
-        self.B[dx:, :dy] += (S_uo - self.B[dx:, :dy]) * inv_gamma
-        self.B[dx:, dy:] += (S_uu - self.B[dx:, dy:]) * inv_gamma
-        if self._store_C:
-            self.C[:dx, :dy] += S_oo
-            self.C[:dx, dy:] += S_ou
-            self.C[dx:, :dy] += S_uo
-            self.C[dx:, dy:] += S_uu
-
         mu = lam_main / float(self.Gamma)
         main_stats = {} if getattr(self, "_profile_ops", False) else None
         optimization_start_time = time.perf_counter()
