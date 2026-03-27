@@ -16,7 +16,7 @@ def tuple_type(inputs):
 def get_cfg():
     parser = argparse.ArgumentParser()
     parser.add_argument("--explore", action="store_true", default=True)
-    parser.add_argument("--init_explore", type=str, choices=["quad", "triple", "sqr", "K", "double"], default="double")
+    parser.add_argument("--init_explore", type=str, choices=["quad", "triple", "sqr", "K", "double","200"], default="double")
     parser.add_argument("--verbose", action="store_true", default=False)
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--case", type=int, default=1)
@@ -104,6 +104,12 @@ def get_cfg():
     parser.add_argument("--kkt_log_every", type=int, default=0)
     parser.add_argument("--kappa_cap", type=float, default=0.0)
     parser.add_argument("--kappa_cap_percentile", type=float, default=0.0)
+
+    # --- Jang et al. (2021) agent options ---
+    parser.add_argument("--jang_rank", type=int, default=None,
+                        help="Rank for rO-UCB (Jang 2021); defaults to min(dim_x, dim_y)")
+    parser.add_argument("--jang_beta_scale", type=float, default=1.0,
+                        help="Confidence radius scale for rO-UCB (Jang 2021)")
 
     cfg = parser.parse_args()
     if cfg.p1 is None:

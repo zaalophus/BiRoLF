@@ -2771,3 +2771,406 @@ class ESTRLowOFUL(ContextualBandit):
         }
         out.update(self.low_oful.__get_param())
         return out
+
+
+class BiRoLFLasso_Blockwise_Imputation(BiRoLFLasso_Blockwise):
+    """
+    BiRoLFLasso_Blockwise with Imputation-only (Direct Method) estimator.
+    Unlike BiRoLFLasso_Blockwise, the main objective matrix B is computed
+    purely from the imputed values (Gx @ Phi_impute @ Gy), without the
+    Doubly Robust IPW correction terms.
+    """
+
+    def choose(self, x: np.ndarray, y: np.ndarray):
+        self.t += 1
+
+        # greedy on current estimate (with optional warmup explore)
+        if self.explore and (self.t <= self.init_explore):
+            a_hat = np.random.choice(np.arange(self.M * self.N))
+        else:
+            decision = x @ self.Phi_hat @ y.T  # (M,N)
+            a_hat = int(np.argmax(decision))
+
+        i_hat, j_hat = action_to_ij(a_hat, self.N)
+        self.a_hat = a_hat
+        self.i_hat = i_hat
+        self.j_hat = j_hat
+
+        # store only once
+        self._hat_history = getattr(self, "_hat_history", {})
+        self._hat_history[self.t] = (i_hat, j_hat)
+
+        # pseudo / chosen sampling (resample chosen and pseudo until match or max_iter)
+        total_arms = self.M * self.N
+
+        chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
+        chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
+        
+        chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
+        self.chosen_action = chosen_action
+
+        return self.chosen_action
+    
+    def update(self, x: np.ndarray, y: np.ndarray, r: float):
+        self._init_blockwise_caches(x, y)
+        self._last_impute_time = 0.0
+        self._last_main_time = 0.0
+        self._last_impute_iters = 0
+        self._last_main_iters = 0
+        self._last_block_iters = {}
+
+        ci, cj = action_to_ij(self.chosen_action, self.N)
+
+        kappa_x = self.kappa_x if self.kappa_x is not None else np.max(np.abs(x))
+        kappa_y = self.kappa_y if self.kappa_y is not None else np.max(np.abs(y))
+        lam_impute = self.lam_c_impute * (
+            2 * self.sigma * kappa_x * kappa_y *
+            np.sqrt(2 * self.t * np.log(2 * self.M * self.N * (self.t ** 2) / self.delta))
+        )
+
+        self.reward_history.append(r)
+        self._update_impute_caches(ci, cj, r)
+
+        L_imp = self._impute_lipschitz_upper()
+        impute_stats = {} if getattr(self, "_profile_ops", False) else None
+        impute_start = time.perf_counter()
+        if self.impute_use_backtracking:
+            Phi_impute = self._fista_l1_backtracking(
+                self.impute_prev,
+                lam_impute,
+                self._grad_impute,
+                self._g_impute,
+                L_imp,
+                stats=impute_stats,
+            )
+        else:
+            Phi_impute = self._fista_l1(
+                self.impute_prev,
+                lam_impute,
+                self._grad_impute,
+                L_imp,
+                stats=impute_stats,
+            )
+        self._last_impute_time = time.perf_counter() - impute_start
+        if impute_stats is not None:
+            self._last_impute_iters = int(impute_stats.get("iters", 0))
+
+        # Imputation-only: B is computed purely from imputed values (no IPW correction).
+        self.Gamma = int(np.sum(self.Ncnt))
+        if self.Gamma <= 0:
+            return
+        self.B = self.Gx @ Phi_impute @ self.Gy
+
+        Phi_main = Phi_impute
+
+        self.Phi_hat = Phi_main
+        self.Phi_check = Phi_impute
+        self.impute_prev = Phi_impute
+        self.main_prev = Phi_main
+
+
+# ---------------------------------------------------------------------------
+# Jang et al. (ICML 2021) — internal helpers + algorithm implementations
+# ---------------------------------------------------------------------------
+# Originally from jang2021.py (now removed).  Inlined here so models.py is
+# self-contained.
+# ---------------------------------------------------------------------------
+
+def _jang_sm_update(Vinv: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """Rank-1 Sherman-Morrison update of V^{-1} after adding u u^T."""
+    Vu = Vinv @ u
+    denom = 1.0 + float(u @ Vu)
+    return Vinv - np.outer(Vu, Vu) / denom
+
+
+def _jang_build_action_matrix(X: np.ndarray, Z: np.ndarray) -> np.ndarray:
+    """Build vectorised action set A of shape (M*N, d1*d2).
+    A[i*N + j] = vec(X[i] Z[j]^T)."""
+    M, d1 = X.shape
+    N, d2 = Z.shape
+    A = np.empty((M * N, d1 * d2), dtype=float)
+    for i in range(M):
+        for j in range(N):
+            A[i * N + j] = np.outer(X[i], Z[j]).ravel()
+    return A
+
+
+
+class _JangEpsilonFALB_impl:
+    """
+    epsilon-FALB via Phase Elimination (Valko et al. 2014, Algorithm 4).
+    Regret O~(sqrt(d1*d2*(d1+d2)*T)) for continuous spaces;
+             O~(sqrt(d1*d2*log(MN)*T)) for finite arm sets.
+    """
+    def __init__(self, X: np.ndarray, Z: np.ndarray, T: int,
+                 delta: float = 0.1, sigma: float = 1.0):
+        M, d1 = X.shape
+        N, d2 = Z.shape
+        self.d = d1 * d2
+        self.M, self.N = M, N
+        self.T = T
+
+        self.A_full = _jang_build_action_matrix(X, Z)
+        K = M * N
+        self.beta = 2.0 * sigma * np.sqrt(
+            14.0 * np.log(2.0 * K * np.log2(max(T, 2)) / delta) + 1.0
+        )
+
+        lam = 1.0 / self.d
+        self.Vinv = self.d * np.eye(self.d)
+        self.b = np.zeros(self.d)
+
+        self.active_idx = np.arange(K)
+        self.theta_hat = np.zeros(self.d)
+
+        self.phase = 1
+        self._phase_start = 1
+        self._phase_end = 2
+        self.t = 0
+        self._done = False
+
+    def _end_phase(self):
+        self.theta_hat = self.Vinv @ self.b
+        A_act = self.A_full[self.active_idx]
+        exp = A_act @ self.theta_hat
+        AV = A_act @ self.Vinv
+        w = np.sqrt(np.einsum("ni,ni->n", AV, A_act))
+        ucb = exp + self.beta * w
+        lcb = exp - self.beta * w
+        p = float(np.max(lcb))
+        self.active_idx = self.active_idx[ucb >= p]
+        self.Vinv = self.d * np.eye(self.d)
+        self.b = np.zeros(self.d)
+        self.phase += 1
+        self._phase_start = self._phase_end
+        self._phase_end = 2 * self._phase_start
+
+    def choose(self):
+        self.t += 1
+        if self._done or len(self.active_idx) == 1:
+            A_act = self.A_full[self.active_idx]
+            best_local = int(np.argmax(A_act @ self.theta_hat))
+            arm = int(self.active_idx[best_local])
+            return arm // self.N, arm % self.N
+        A_act = self.A_full[self.active_idx]
+        AV = A_act @ self.Vinv
+        w = np.sqrt(np.einsum("ni,ni->n", AV, A_act))
+        arm = int(self.active_idx[int(np.argmax(w))])
+        return arm // self.N, arm % self.N
+
+    def update(self, i: int, j: int, r: float):
+        if self._done or len(self.active_idx) == 1:
+            return
+        a = self.A_full[i * self.N + j]
+        self.Vinv = _jang_sm_update(self.Vinv, a)
+        self.b += r * a
+        if self.t >= self._phase_end - 1:
+            if self.t < self.T:
+                self._end_phase()
+            else:
+                self.theta_hat = self.Vinv @ self.b
+                self._done = True
+
+
+class _JangRoUCB_impl:
+    """
+    rO-UCB: rank-r Oracle UCB (Algorithm 5 in Jang et al. 2021).
+    Oracle: Burer-Monteiro (2003) factorisation Theta = UV^T (rank <= r by construction),
+    optimised via augmented Lagrangian + subgradient ascent inside the W-confidence ellipsoid.
+    Replaces the previous Frobenius-norm truncated-SVD approximation.
+    Regret O~(sqrt(r * d^3 * T)) under oracle assumption.
+    """
+    def __init__(self, X: np.ndarray, Z: np.ndarray, rank: int,
+                 delta: float = 0.1, sigma: float = 1.0,
+                 beta_scale: float = 1.0):
+        M, d1 = X.shape
+        N, d2 = Z.shape
+        self.d1, self.d2 = d1, d2
+        self.d = d1 * d2
+        self.M, self.N = M, N
+        self.X, self.Z = X, Z
+        self.rank = rank
+        self.C = float(np.sqrt(rank))
+        self.sigma = sigma
+        self.delta = delta
+        self.beta_scale = beta_scale
+
+        self.Winv = np.eye(self.d)
+        self.W = np.eye(self.d)   # explicit W = I + sum a_t a_t^T, needed for BM oracle
+        self.b = np.zeros(self.d)
+        self._logdet_W = 0.0
+        self.A = _jang_build_action_matrix(X, Z)
+        self.t = 0
+        self.Theta_hat = np.zeros((d1, d2))
+
+    def _bm_oracle(self, n_iter: int = 100, lr: float = 0.005,
+                   sigma_aug: float = 10.0) -> np.ndarray:
+        """
+        Burer-Monteiro oracle for rO-UCB.
+
+        Solves:
+            max_{U in R^{d1 x r}, V in R^{d2 x r}}  max_{(i,j)} x_i^T UV^T z_j
+            s.t.  (vec(UV^T) - theta_hat)^T W (vec(UV^T) - theta_hat) <= beta^2
+
+        via augmented Lagrangian + subgradient ascent on (U, V).
+
+        Gradients (analytically derived):
+            d/dU  ||vec(UV^T) - theta_hat||_W^2  =  2 * reshape(W r_vec, d1, d2) @ V
+            d/dV  ||vec(UV^T) - theta_hat||_W^2  =  2 * reshape(W r_vec, d1, d2).T @ U
+            d/dU  x_b^T UV^T z_b                 =  outer(x_b, V^T z_b)
+            d/dV  x_b^T UV^T z_b                 =  outer(z_b, U^T x_b)
+        where r_vec = vec(UV^T) - theta_hat.
+        """
+        theta_hat = self.Winv @ self.b
+        Theta_hat = theta_hat.reshape(self.d1, self.d2)
+        beta = self._beta()
+
+        # Initialise (U, V) from truncated SVD of Theta_hat
+        Us, s, Vt = np.linalg.svd(Theta_hat, full_matrices=False)
+        r = min(self.rank, len(s))
+        scale = np.sqrt(np.maximum(s[:r], 0.0))
+        U = Us[:, :r] * scale   # (d1, r)
+        V = Vt[:r].T * scale    # (d2, r)
+
+        # If initial point violates the ellipsoid, scale (U, V) inward
+        r_vec0 = (U @ V.T).ravel() - theta_hat
+        g0 = float(r_vec0 @ (self.W @ r_vec0)) - beta ** 2
+        if g0 > 0:
+            alpha = np.sqrt(beta ** 2 / (g0 + beta ** 2))
+            U *= alpha
+            V *= alpha
+
+        lam = 0.0  # dual variable (>= 0)
+
+        for _ in range(n_iter):
+            Theta = U @ V.T                         # (d1, d2)
+            r_vec = Theta.ravel() - theta_hat       # (d,)
+            W_r = self.W @ r_vec                    # (d,)
+            g = float(r_vec @ W_r) - beta ** 2     # constraint value
+            W_R = W_r.reshape(self.d1, self.d2)    # (d1, d2)
+
+            # Subgradient of objective at current best arm
+            score_mat = self.X @ Theta @ self.Z.T  # (M, N)
+            best = int(np.argmax(score_mat))
+            bi, bj = divmod(best, self.N)
+            x_b, z_b = self.X[bi], self.Z[bj]
+
+            grad_U_f = np.outer(x_b, V.T @ z_b)   # (d1, r)
+            grad_V_f = np.outer(z_b, U.T @ x_b)   # (d2, r)
+
+            # Gradient of ellipsoid constraint
+            grad_U_g = 2.0 * W_R @ V               # (d1, r)
+            grad_V_g = 2.0 * W_R.T @ U             # (d2, r)
+
+            # Augmented Lagrangian penalty coefficient
+            penalty = lam + sigma_aug * max(0.0, g)
+
+            # Gradient ascent on objective, penalise constraint violation
+            U += lr * (grad_U_f - penalty * grad_U_g)
+            V += lr * (grad_V_f - penalty * grad_V_g)
+
+            # Dual variable update
+            lam = max(0.0, lam + sigma_aug * g)
+
+        Theta_r = U @ V.T
+        frob = np.linalg.norm(Theta_r, "fro")
+        if frob > self.C:
+            Theta_r *= self.C / frob
+        return Theta_r
+
+    def _oracle(self):
+        theta_vec = self.Winv @ self.b
+        Theta = theta_vec.reshape(self.d1, self.d2)
+        U, s, Vt = np.linalg.svd(Theta, full_matrices=False)
+        r = min(self.rank, len(s))
+        s_trunc = np.zeros_like(s)
+        s_trunc[:r] = s[:r]
+        Theta_r = U @ np.diag(s_trunc) @ Vt
+        frob = np.linalg.norm(Theta_r, "fro")
+        if frob > self.C:
+            Theta_r *= self.C / frob
+        return Theta_r
+
+    def _beta(self):
+        noise = self.sigma * np.sqrt(2.0 * self._logdet_W + 2.0 * np.log(1.0 / self.delta))
+        return self.beta_scale * (noise + self.C)
+
+    def choose(self):
+        self.t += 1
+        self.Theta_hat = self._bm_oracle()
+        beta = self._beta()
+        exp_mat = self.X @ self.Theta_hat @ self.Z.T
+        AW = self.A @ self.Winv
+        widths = np.sqrt(np.einsum("ni,ni->n", AW, self.A))
+        width_mat = widths.reshape(self.M, self.N)
+        best = int(np.argmax(exp_mat + beta * width_mat))
+        return best // self.N, best % self.N
+
+    def update(self, i: int, j: int, r: float):
+        a = self.A[i * self.N + j]
+        va = float(a @ self.Winv @ a)
+        self._logdet_W += np.log(1.0 + va)
+        self.Winv = _jang_sm_update(self.Winv, a)
+        self.W += np.outer(a, a)
+        self.b += r * a
+
+
+# ---------------------------------------------------------------------------
+# Public wrappers: choose(x,y) / update(x,y,r) interface for main.py
+# ---------------------------------------------------------------------------
+
+class _JangBase:
+    """Lazy-init base: arm features are fixed on the first choose() call."""
+
+    def choose(self, x: np.ndarray, y: np.ndarray) -> int:
+        if self._inner is None:
+            self._lazy_init(x, y)
+        i, j = self._inner.choose()
+        self._last_i, self._last_j = i, j
+        return int(i * self._N + j)
+
+    def update(self, x: np.ndarray, y: np.ndarray, r: float):
+        self._inner.update(self._last_i, self._last_j, float(r))
+
+
+class JangEpsilonFALB(_JangBase):
+    """
+    epsilon-FALB (Phase Elimination on the finite bilinear arm set) from
+    Jang et al. 2021.  Regret O~(sqrt(d1*d2*(d1+d2)*T)).
+    """
+    def __init__(self, T: int, delta: float = 0.1, sigma: float = 1.0):
+        self.T = T
+        self.delta = delta
+        self.sigma = sigma
+        self._inner = None
+        self._N = None
+        self._last_i = self._last_j = 0
+
+    def _lazy_init(self, x: np.ndarray, y: np.ndarray):
+        self._N = y.shape[0]
+        self._inner = _JangEpsilonFALB_impl(x, y, self.T, delta=self.delta,
+                                             sigma=self.sigma)
+
+
+class JangRoUCB(_JangBase):
+    """
+    rO-UCB (rank-r Oracle UCB) from Jang et al. 2021.
+    Regret O~(sqrt(r * d^3 * T)) under oracle assumption.
+    Oracle: truncated-SVD of the ridge estimate (Burer-Monteiro approx).
+    """
+    def __init__(self, rank: int, delta: float = 0.1, sigma: float = 1.0,
+                 beta_scale: float = 1.0):
+        self.rank = rank
+        self.delta = delta
+        self.sigma = sigma
+        self.beta_scale = beta_scale
+        self._inner = None
+        self._N = None
+        self._last_i = self._last_j = 0
+
+    def _lazy_init(self, x: np.ndarray, y: np.ndarray):
+        self._N = y.shape[0]
+        self._inner = _JangRoUCB_impl(x, y, self.rank, delta=self.delta,
+                                       sigma=self.sigma,
+                                       beta_scale=self.beta_scale)
+

@@ -24,8 +24,12 @@ AGENT_DICT = {
     "birolf_lasso_old": "BiRoLF-Lasso-Old",
     "birolf_lasso": "BiRoLF w/o Blockwise (Ours)",
     "birolf_lasso_blockwise": "BiRoLF (Ours)",
-    "estr_lowoful": "ESTR+LowOFUL",
+    "birolf_lasso_blockwise_imputation": "BiRoLF-Imputation",
+    "estr_lowoful": "ESTR+LowOFUL(Jun2021)",
     "dr_lasso": "DRLasso",
+    # Jang et al. (ICML 2021)
+    "jang_efalb": r"$\epsilon$-FALB (Jang 2021)",
+    "jang_roucb": "rO-UCB (Jang 2021)",
 }
 
 cfg = None
@@ -251,12 +255,30 @@ def bilinear_run_trial(
         "K": (M * N),
         "triple": (3 * (M * N)),
         "quad": (4 * (M * N)),
+        "1.5": (int)(1.5 * M * N),
+        "half": (int)(0.5*M*N),
+        "200":200
     }
 
     ## run and collect the regrets
     regret_container = np.zeros(1, dtype=object)
     
     ### Setting random state (Manual Folded)
+
+    ## sample features (moved up so jang2021 agents can use X, Y at construction time)
+    ## X_star: (d_x_star, M)
+    ## X: (d_x, M)
+    ## Y_star: (d_y_star, N)
+    ## Y: (d_y, N)
+    X_star, X, Y_star, Y = bilinear_feature_generator(
+        case=case,
+        d_x_star=d_x_star,
+        d_x=d_x,
+        d_y_star=d_y_star,
+        d_y=d_y,
+        M=M,
+        N=N,
+    )
 
     ### Select agent (Manual Folded)
     if agent_type == "linucb":
@@ -445,6 +467,60 @@ def bilinear_run_trial(
                 block_use_batched=getattr(cfg, "block_use_batched", True),
             )
 
+    elif agent_type == "birolf_lasso_blockwise_imputation":
+        if cfg.explore:
+            agent = BiRoLFLasso_Blockwise_Imputation(
+                M=M,
+                N=N,
+                d_x=d_x,
+                d_y=d_y,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                explore=cfg.explore,
+                init_explore=exp_map[cfg.init_explore],
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+                block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+                block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+                block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+                block_tol=getattr(cfg, "block_tol", 1e-6),
+                block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
+            )
+        else:
+            agent = BiRoLFLasso_Blockwise_Imputation(
+                M=M,
+                N=N,
+                d_x=d_x,
+                d_y=d_y,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+                block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+                block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+                block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+                block_tol=getattr(cfg, "block_tol", 1e-6),
+                block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
+            )
+
     elif agent_type == "estr_lowoful":
         agent = ESTRLowOFUL(
             d1=d_x,
@@ -458,7 +534,22 @@ def bilinear_run_trial(
             delta=cfg.delta,
             sigma=noise_std,
         )
-    
+
+    elif agent_type == "jang_efalb":
+        agent = JangEpsilonFALB(
+            T=horizon,
+            delta=cfg.delta,
+            sigma=noise_std,
+        )
+
+    elif agent_type == "jang_roucb":
+        agent = JangRoUCB(
+            rank=cfg.jang_rank if cfg.jang_rank is not None else min(d_x, d_y),
+            delta=cfg.delta,
+            sigma=noise_std,
+            beta_scale=getattr(cfg, "jang_beta_scale", 1.0),
+        )
+
     ## sample features
     ## X_star: (d_x_star, M)
     ## X: (d_x, M)
@@ -496,7 +587,7 @@ def bilinear_run_trial(
     exp_rewards_mat = exp_rewards_mat / np.max(np.abs(exp_rewards_mat))
 
     if (
-        isinstance(agent, (LinUCB,LinTS,DRLassoBandit,ESTRLowOFUL))
+        isinstance(agent, (LinUCB,LinTS,DRLassoBandit,ESTRLowOFUL,JangEpsilonFALB,JangRoUCB))
     ):
         data_x = X.T
         data_y = Y.T
@@ -591,7 +682,7 @@ def bilinear_run(
     # For linear contextual bandits
     # For RoLF this is (MN,MN), otherwise (MN,d_x*d_y)
     z = None
-    if not isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+    if not isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
         z = np.kron(x, y)
 
     # z = np.kron(x, y)
@@ -612,7 +703,7 @@ def bilinear_run(
         )
 
         choose_start_time = time.perf_counter()
-        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
             chosen_action = agent.choose(x, y)
         elif isinstance(agent, ContextualBandit):
             chosen_action = agent.choose(z)
@@ -641,14 +732,15 @@ def bilinear_run(
                     """
                 
             save_log(path=LOG_PATH, fname=fname, string=" ".join(string.split()))
-            print(" ".join(string.split()))
+            if t % 100 == 0:
+                print(" ".join(string.split()))
 
         ## compute the regret
         regrets[t] = optimal_reward - exp_rewards_mat[chosen_i, chosen_j]
 
         ## update the agent with timing measurement
         update_start_time = time.perf_counter()
-        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL)):
+        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL,JangEpsilonFALB, JangRoUCB)):
             agent.update(x=x, y=y, r=chosen_reward)
         elif isinstance(agent, ContextualBandit):
             agent.update(x=z, r=chosen_reward)
@@ -724,7 +816,23 @@ def bilinear_show_result(
 ):
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    colors = ["blue", "orange", "green", "red", "purple", "black", "brown", "olive", "cyan"]
+    colors = [
+    '#1f77b4',  # 파랑
+    '#ff7f0e',  # 주황
+    '#2ca02c',  # 초록
+    '#d62728',  # 빨강
+    '#9467bd',  # 보라
+    '#8c564b',  # 갈색
+    '#e377c2',  # 분홍
+    '#7f7f7f',  # 회색
+    '#bcbd22',  # 올리브
+    '#17becf',  # 청록
+    '#aec7e8',  # 연파랑
+    '#ffbb78',  # 연주황
+    '#98df8a',  # 연초록
+    '#ff9896',  # 연빨강
+    '#c5b0d5',  # 연보라
+]
     period = horizon // 10
 
     z_init = len(colors)
@@ -735,14 +843,25 @@ def bilinear_show_result(
         if k not in {"BiRoLF w/o Blockwise (Ours)", "RoLF-Ridge"}
     ]
     style_map = {
-        "BiRoLF (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 8},
-        "BiRoLF w/o Blockwise (Ours)": {"marker": "^", "linestyle": "--", "alpha": 1.0, "z": 7},
-        "RoLF": {"marker": "o", "linestyle": "-", "alpha": 1.0, "z": 6},
-        "RoLF-Ridge": {"marker": "D", "linestyle": "-.", "alpha": 1.0, "z": 5},
-        "DRLasso": {"marker": "X", "linestyle": "-", "alpha": 1.0, "z": 4},
-        "LinUCB": {"marker": "P", "linestyle": "-", "alpha": 1.0, "z": 3},
-        "LinTS": {"marker": "v", "linestyle": "-", "alpha": 1.0, "z": 2},
-        "UCB(δ)": {"marker": "*", "linestyle": "-", "alpha": 1.0, "z": 1},
+        "BiRoLF (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 12},
+        "BiRoLF w/o Blockwise (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 11},
+        
+        "BiRoLF-Imputation": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 10},
+
+        "ESTR+LowOFUL": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 9},
+
+        # Jang et al. (ICML 2021)
+        "rO-UCB (Jang 2021)":        {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 8},
+        r"$\epsilon$-FALB (Jang 2021)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 7},
+        
+        "RoLF": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 6},
+        "RoLF-Ridge": {"marker": "s", "linestyle": "-.", "alpha": 1.0, "z": 5},
+        "DRLasso": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 4},
+        
+        "LinUCB": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 3},
+        "LinTS": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 2},
+        
+        "UCB(δ)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 1},
     }
 
     for i, (color, (key, item)) in enumerate(zip(colors, filtered)):
@@ -811,6 +930,13 @@ def bilinear_run_agent(args):
     # Initialize local timing data for this process
     local_timing_data = {"optimization": {}, "breakdown": {}, "iters": {}}
     
+    if cfg.case == 4:
+        target_case = 3
+    elif cfg.case == 5:
+        target_case = 4
+    else:
+        target_case = cfg.case
+        
     regrets = bilinear_run_trial(
         agent_type=agent_type,
         now_trial=now_trial,
@@ -824,7 +950,7 @@ def bilinear_run_agent(args):
         noise_std=cfg.reward_std,
         case=cfg.case,
         verbose=True,
-        fname=f"Seed_{cfg.seed}_Case_{cfg.case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}",
+        fname=f"Seed_{cfg.seed}_Case_{target_case}_Agent_{agent_type}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}",
         timing_data=local_timing_data  # Pass timing data container
     )
     
@@ -959,7 +1085,7 @@ def plot_optimization_timing_comparison():
     os.makedirs(FIGURE_PATH, exist_ok=True)
     plt.savefig(f"{FIGURE_PATH}/optimization_timing_comparison_{fname_params}.png", dpi=300, bbox_inches='tight')
     plt.savefig(f"{FIGURE_PATH}/optimization_timing_comparison_{fname_params}.pdf", bbox_inches='tight')
-    plt.show()
+    # plt.show()
     
     # Print summary
     print("\n" + "="*60)
@@ -1049,7 +1175,7 @@ def plot_total_execution_time_comparison():
     os.makedirs(FIGURE_PATH, exist_ok=True)
     plt.savefig(f"{FIGURE_PATH}/total_execution_time_comparison_{fname_params}.png", dpi=300, bbox_inches='tight')
     plt.savefig(f"{FIGURE_PATH}/total_execution_time_comparison_{fname_params}.pdf", bbox_inches='tight')
-    plt.show()
+    # plt.show()
 
     print("\n" + "="*80)
     print("TOTAL EXECUTION TIME COMPARISON SUMMARY")
@@ -1220,8 +1346,13 @@ def save_timing_data():
     T = cfg.horizon
     sigma = cfg.reward_std
     
-    timing_fname = f"timing_Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
-    
+    if case == 4:
+        timing_fname = f"timing_Case_3_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+    elif case == 5:
+        timing_fname = f"timing_Case_4_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+    else:
+        timing_fname = f"timing_Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+        
     # Save detailed timing data
     with open(f"{RESULT_PATH}/{timing_fname}_detailed.pkl", "wb") as f:
         pickle.dump(timing_summary, f)
@@ -1269,11 +1400,26 @@ def run_main(given_cfg = None):
     date = datetime.now().strftime('%Y-%m-%d')
     RUN_TAG = dt.now().strftime("%H%M")
 
-    RESULT_PATH = f"{MOTHER_PATH}/results/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-    FIGURE_PATH = f"{MOTHER_PATH}/figures/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-    LOG_PATH = (
-        f"{MOTHER_PATH}/logs/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
-    )
+    target_path = f"4. Rebuttal/exp_{cfg.init_explore}_seed_{cfg.seed}_arm_{cfg.arm_x}_dim_{cfg.dim_x}_true_dim_{cfg.true_dim_x}"
+    if cfg.case == 4:
+        RESULT_PATH = f"{MOTHER_PATH}/{target_path}/results/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        FIGURE_PATH = f"{MOTHER_PATH}/{target_path}/figures/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        LOG_PATH = (
+            f"{MOTHER_PATH}/{target_path}/logs/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        )
+    elif cfg.case == 5:
+        RESULT_PATH = f"{MOTHER_PATH}/{target_path}/results/{date}/case_4_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        FIGURE_PATH = f"{MOTHER_PATH}/{target_path}/figures/{date}/case_4_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        LOG_PATH = (
+            f"{MOTHER_PATH}/{target_path}/logs/{date}/case_4_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        )
+    else:
+        RESULT_PATH = f"{MOTHER_PATH}/{target_path}/results/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        FIGURE_PATH = f"{MOTHER_PATH}/{target_path}/figures/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        LOG_PATH = (
+            f"{MOTHER_PATH}/{target_path}/logs/{date}/case_{cfg.case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+        )
+        
 
     ##
     _maybe_set_blas_threads()
@@ -1295,11 +1441,17 @@ def run_main(given_cfg = None):
         # "birolf_lasso_old",
         "birolf_lasso",
         "birolf_lasso_blockwise",
+        "birolf_lasso_blockwise_imputation",
         "rolf_lasso",
         "dr_lasso",
-        "linucb",
-        "lints",
+        # "linucb",
+        # "lints",
         "mab_ucb",
+        "estr_lowoful",
+        
+        # Jang et al. (ICML 2021)
+        "jang_roucb",
+        "jang_efalb",
     ]
     TRIALS_AGENTS = []
     for _agent in AGENTS:
@@ -1409,7 +1561,12 @@ def run_main(given_cfg = None):
 
     fig = bilinear_show_result(regrets=regret_results, horizon=T, fontsize=15)
 
-    fname = f"Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+    if case == 4:
+        fname = f"Case_3_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+    elif case ==5:
+        fname = f"Case_4_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
+    else:
+        fname = f"Case_{case}_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}_dx_{d_x}_dy_{d_y}_T_{T}_explored_{cfg.init_explore}_noise_{sigma}_run_{RUN_TAG}"
 
     save_plot(fig, path=FIGURE_PATH, time_check = time_check, fname=fname)
     save_result(
