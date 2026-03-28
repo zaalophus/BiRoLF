@@ -11,4 +11,5 @@ if __name__ == "__main__":
         for i in data[1]:
             print(i)
             
-        print(len(data[1]["RoLF"][0]))
+        print(data[1]["rO-UCB (Jang 2021)"][0][-1])
+        print(data[1]["rO-UCB (Jang 2021)"][0][-2])

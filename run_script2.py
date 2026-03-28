@@ -1,4 +1,4 @@
-from main import run_main
+from main import run_main, run_movieLens
 from cfg import get_cfg
 
 class Script:
@@ -164,7 +164,10 @@ if __name__ == "__main__":
                             sequential_benchmark=True,
                             seed = seed,
                             kappa_cap_percentile = 0)
-                        run_main(now_script.cfg)
+                        # run_main(now_script.cfg)
+                        run_movieLens(now_script.cfg,sampling=True,n_sample=20)
+                        
+                        
                         
                         # elif true_dim ==20 and num_arm ==25 and dim ==10:
                         #     now_script = Script(cfg,

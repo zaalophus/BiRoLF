@@ -670,6 +670,7 @@ def bilinear_run(
     verbose: bool,
     fname: str,
     timing_data: dict = None,
+    log_context: dict = None,
 ):
     # x, y: augmented feature if the agent is RoLF (M, M), (N, N) each.
     regrets = np.zeros(horizon, dtype=float)
@@ -715,20 +716,27 @@ def bilinear_run(
 
         # HERE
         if t % 10 == 0  and verbose:
+            _lc    = log_context or {}
+            _M     = _lc.get('M',        cfg.arm_x)
+            _N     = _lc.get('N',        cfg.arm_y)
+            _dxs   = _lc.get('d_x_star', cfg.true_dim_x)
+            _dys   = _lc.get('d_y_star', cfg.true_dim_y)
+            _dx    = _lc.get('d_x',      cfg.dim_x)
+            _dy    = _lc.get('d_y',      cfg.dim_y)
             try:
                 string = f"""
-                        case : {cfg.case}, SEED : {cfg.seed}, M : {cfg.arm_x}, N: {cfg.arm_y},
-                        true_dim_x : {cfg.true_dim_x}, true_dim_y : {cfg.true_dim_y}, Obs_dim_x : {cfg.dim_x}, Obs_dim_y : {cfg.dim_y},
+                        case : {cfg.case}, SEED : {cfg.seed}, M : {_M}, N: {_N},
+                        true_dim_x : {_dxs}, true_dim_y : {_dys}, Obs_dim_x : {_dx}, Obs_dim_y : {_dy},
                         Trial : {trial}, p : {cfg.p}, Agent : {agent.__class__.__name__},
                         Round : {t+1}, optimal : {optimal_action}, a_hat: {agent.a_hat},
-                        pseudo : {agent.pseudo_action}, chosen action : {ij_to_action(chosen_i,chosen_j,cfg.arm_y)}
+                        pseudo : {agent.pseudo_action}, chosen action : {ij_to_action(chosen_i,chosen_j,_N)}
                     """
             except:
                 string = f"""
-                        case : {cfg.case}, SEED : {cfg.seed}, M : {cfg.arm_x}, N: {cfg.arm_y},
-                        true_dim_x : {cfg.true_dim_x}, true_dim_y : {cfg.true_dim_y}, Obs_dim_x : {cfg.dim_x}, Obs_dim_y : {cfg.dim_y},
+                        case : {cfg.case}, SEED : {cfg.seed}, M : {_M}, N: {_N},
+                        true_dim_x : {_dxs}, true_dim_y : {_dys}, Obs_dim_x : {_dx}, Obs_dim_y : {_dy},
                         Trial : {trial}, p : {cfg.p}, Agent : {agent.__class__.__name__},
-                        Round : {t+1}, optimal : {optimal_action}, chosen action: {ij_to_action(chosen_i,chosen_j,cfg.arm_y)}
+                        Round : {t+1}, optimal : {optimal_action}, chosen action: {ij_to_action(chosen_i,chosen_j,_N)}
                     """
                 
             save_log(path=LOG_PATH, fname=fname, string=" ".join(string.split()))
@@ -1583,6 +1591,635 @@ def run_main(given_cfg = None):
     print("="*80)
     plot_timing_analysis()
     print("All plots and results saved successfully!")
+
+
+# ============================================================
+# MovieLens Experiment
+# ============================================================
+
+def do_movie_experiment(
+    case: int,
+    d_unobs_movie: int = 4,
+    d_unobs_user: int = 4,
+    movie_ids=None,
+    user_ids=None,
+):
+    """
+    Load MovieLens data and build a bilinear bandit problem.
+
+    Observable movie features : Year (norm) + 18 genre indicators  → d_x dims
+    Observable user  features : Age (norm), Occupation (norm), Zip-region (norm) → 3 dims
+
+    Adds d_unobs_movie / d_unobs_user unobservable dimensions according to `case`
+    (same 9-case structure as bilinear_feature_generator), then fits the true
+    parameter matrix Theta via least-squares on observed ratings so that
+        X_star.T @ Theta @ Y_star  ≈  (ratings normalised to [-1, 1])
+
+    Parameters
+    ----------
+    movie_ids : array-like or None
+        Restrict to this subset of MovieIDs.  None → all movies.
+    user_ids  : array-like or None
+        Restrict to this subset of UserIDs.   None → all users.
+
+    Returns
+    -------
+    X_star, X, Y_star, Y, exp_rewards_mat, M, N, d_x, d_y, d_x_star, d_y_star
+    """
+    from open_movieLens import read_movies, read_ratings, read_users
+
+    movies_df  = read_movies()
+    users_df   = read_users()          # Gender NOT dropped; excluded from feature cols below
+    ratings_df = read_ratings()
+
+    # ── subset to requested IDs ──────────────────────────────────────────
+    if movie_ids is not None:
+        movies_df = movies_df[movies_df['MovieID'].isin(movie_ids)].reset_index(drop=True)
+    if user_ids is not None:
+        users_df  = users_df[users_df['UserID'].isin(user_ids)].reset_index(drop=True)
+
+    # ── observable movie features ────────────────────────────────────────
+    movies_df['Year'] = movies_df['Year'].fillna(movies_df['Year'].median())
+    yr_min, yr_max = movies_df['Year'].min(), movies_df['Year'].max()
+    movies_df['Year_norm'] = (movies_df['Year'] - yr_min) / max(float(yr_max - yr_min), 1.0)
+
+    all_genres = sorted({g for gs in movies_df['Genres'] for g in gs.split('|')})
+    genre_mat  = np.array(
+        [[1.0 if g in row.split('|') else 0.0 for g in all_genres]
+         for row in movies_df['Genres']]
+    ).T  # (n_genres, M)
+
+    movie_year = movies_df['Year_norm'].values[np.newaxis, :]  # (1, M)
+    X_obs = np.concatenate([movie_year, genre_mat], axis=0).astype(float)  # (d_x, M)
+    d_x   = X_obs.shape[0]
+    M     = X_obs.shape[1]
+    all_movie_ids = movies_df['MovieID'].values
+
+    # ── observable user features ─────────────────────────────────────────
+    age = users_df['Age'].values.astype(float)
+    age_norm = (age - age.min()) / max(age.max() - age.min(), 1.0)
+    occ_norm = users_df['Occupation'].values.astype(float) / 20.0
+
+    def _zip_region(z):
+        s = str(z).strip()
+        return int(s[0]) / 9.0 if s and s[0].isdigit() else 0.0
+
+    zip_reg = np.array([_zip_region(z) for z in users_df['Zip'].values], dtype=float)
+
+    # Observable user features: Age, Occupation, Zip-region  (Gender excluded)
+    Y_obs = np.stack([age_norm, occ_norm, zip_reg], axis=0)  # (d_y, N)
+    d_y   = Y_obs.shape[0]
+    N     = Y_obs.shape[1]
+    all_user_ids = users_df['UserID'].values
+
+    d_u      = d_unobs_movie
+    d_v      = d_unobs_user
+    d_x_star = d_x + d_u
+    d_y_star = d_y + d_v
+
+    # ── add unobservable movie features (case-dependent) ─────────────────
+    if case in [1, 2, 3]:
+        # Default: independently random unobservable appended
+        U      = np.random.randn(d_u, M)
+        X_star = np.concatenate([X_obs, U], axis=0)
+        X      = X_obs
+    elif case in [4, 5, 6]:
+        # R(U) ⊆ R(X): unobservable is a linear mix of observable movie features
+        C_u    = np.random.uniform(-1/np.pi, 1/np.pi, size=(d_u, d_x))
+        U      = C_u @ X_obs
+        X_star = np.concatenate([X_obs, U], axis=0)
+        X      = X_obs
+    else:  # case in [7, 8, 9]
+        # R(X) ⊆ R(U): observable features are derived from richer latent factors
+        U      = np.random.randn(d_u, M)
+        C_u    = np.random.uniform(-1/np.pi, 1/np.pi, size=(d_x, d_u))
+        X      = C_u @ U
+        X_star = np.concatenate([X, U], axis=0)
+
+    # ── add unobservable user features (case-dependent) ──────────────────
+    if case in [1, 4, 7]:
+        V      = np.random.randn(d_v, N)
+        Y_star = np.concatenate([Y_obs, V], axis=0)
+        Y      = Y_obs
+    elif case in [2, 5, 8]:
+        C_v    = np.random.uniform(-1/np.pi, 1/np.pi, size=(d_v, d_y))
+        V      = C_v @ Y_obs
+        Y_star = np.concatenate([Y_obs, V], axis=0)
+        Y      = Y_obs
+    else:  # case in [3, 6, 9]
+        V      = np.random.randn(d_v, N)
+        C_v    = np.random.uniform(-1/np.pi, 1/np.pi, size=(d_y, d_v))
+        Y      = C_v @ V
+        Y_star = np.concatenate([Y, V], axis=0)
+
+    # ── fit true parameter Theta from observed ratings ────────────────────
+    #   Solve: min_{Theta} Σ_obs (x_star[:,i]^T Theta y_star[:,j] - r_ij)^2
+    #   i.e. vec(A) = kron(x_star[:,i], y_star[:,j]), A vec(Theta) = r
+    movie_id2idx = {mid: i for i, mid in enumerate(all_movie_ids)}
+    user_id2idx  = {uid: j for j, uid in enumerate(all_user_ids)}
+
+    obs = ratings_df[
+        ratings_df['MovieID'].isin(movie_id2idx) &
+        ratings_df['UserID'].isin(user_id2idx)
+    ]
+
+    if len(obs) > 0:
+        mi     = obs['MovieID'].map(movie_id2idx).values
+        ui     = obs['UserID'].map(user_id2idx).values
+        r_vals = (obs['Rating'].values.astype(float) - 3.0) / 2.0  # [1,5] → [-1,1]
+
+        # Subsample for numerical feasibility
+        MAX_FIT = 50_000
+        if len(r_vals) > MAX_FIT:
+            sel    = np.random.choice(len(r_vals), MAX_FIT, replace=False)
+            mi, ui, r_vals = mi[sel], ui[sel], r_vals[sel]
+
+        n_fit   = len(r_vals)
+        d_theta = d_x_star * d_y_star
+        # A[k, :] = kron(X_star[:, mi[k]], Y_star[:, ui[k]])
+        A = (
+            X_star[:, mi].T[:, :, None] * Y_star[:, ui].T[:, None, :]
+        ).reshape(n_fit, d_theta)
+
+        theta_vec, _, _, _ = np.linalg.lstsq(A, r_vals, rcond=None)
+        Theta = theta_vec.reshape(d_x_star, d_y_star)
+    else:
+        # No observed ratings for this subset: use random Theta
+        Theta = np.random.randn(d_x_star, d_y_star)
+
+    # ── expected reward matrix, normalised to [-1, 1] ────────────────────
+    exp_rewards_mat = X_star.T @ Theta @ Y_star  # (M, N)
+    max_abs = np.max(np.abs(exp_rewards_mat))
+    if max_abs > 1e-12:
+        exp_rewards_mat /= max_abs
+
+    return X_star, X, Y_star, Y, exp_rewards_mat, M, N, d_x, d_y, d_x_star, d_y_star
+
+
+def bilinear_run_trial_movie(
+    agent_type: str,
+    now_trial: int,
+    horizon: int,
+    X_star: np.ndarray,
+    X: np.ndarray,
+    Y_star: np.ndarray,
+    Y: np.ndarray,
+    exp_rewards_mat: np.ndarray,
+    M: int,
+    N: int,
+    d_x: int,
+    d_y: int,
+    d_x_star: int,
+    d_y_star: int,
+    noise_std: float,
+    case: int,
+    verbose: bool,
+    fname: str,
+    timing_data: dict = None,
+):
+    """Single trial for MovieLens experiment with pre-computed features."""
+    total_arms    = M * N
+    total_obs_dim = d_x * d_y
+
+    exp_map = {
+        "double": 2 * total_arms,
+        "sqr":    total_arms ** 2,
+        "K":      total_arms,
+        "triple": 3 * total_arms,
+        "quad":   4 * total_arms,
+        "1.5":    int(1.5 * total_arms),
+        "half":   int(0.5 * total_arms),
+        "200":    200,
+    }
+
+    regret_container = np.zeros(1, dtype=object)
+
+    # ── Agent instantiation (mirrors bilinear_run_trial) ─────────────────
+    if agent_type == "linucb":
+        agent = LinUCB(d=total_obs_dim, lbda=cfg.p, delta=cfg.delta)
+
+    elif agent_type == "lints":
+        agent = LinTS(
+            d=total_obs_dim, lbda=cfg.p, horizon=horizon,
+            reward_std=noise_std, delta=cfg.delta,
+        )
+
+    elif agent_type == "mab_ucb":
+        agent = UCBDelta(n_arms=total_arms, delta=cfg.delta)
+
+    elif agent_type == "rolf_lasso":
+        if cfg.explore:
+            agent = RoLFLasso(
+                d=total_obs_dim, arms=total_arms, p=cfg.p, delta=cfg.delta,
+                sigma=noise_std, explore=cfg.explore,
+                init_explore=exp_map[cfg.init_explore],
+                lam_c_impute=cfg.lamc_rolf_impute, lam_c_main=cfg.lamc_rolf_main,
+            )
+        else:
+            agent = RoLFLasso(
+                d=total_obs_dim, arms=total_arms, p=cfg.p, delta=cfg.delta,
+                sigma=noise_std,
+                lam_c_impute=cfg.lamc_rolf_impute, lam_c_main=cfg.lamc_rolf_main,
+            )
+
+    elif agent_type == "rolf_ridge":
+        if cfg.explore:
+            agent = RoLFRidge(
+                d=total_obs_dim, arms=total_arms, p=cfg.p, delta=cfg.delta,
+                sigma=noise_std, explore=cfg.explore,
+                init_explore=exp_map[cfg.init_explore],
+            )
+        else:
+            agent = RoLFRidge(
+                d=total_obs_dim, arms=total_arms, p=cfg.p, delta=cfg.delta,
+                sigma=noise_std,
+            )
+
+    elif agent_type == "dr_lasso":
+        agent = DRLassoBandit(
+            d=total_obs_dim, arms=total_arms, lam1=1.0, lam2=0.5, zT=10, tr=True,
+        )
+
+    elif agent_type == "birolf_lasso_old":
+        kw = dict(
+            M=M, N=N, sigma=noise_std, delta=cfg.delta, p=cfg.p,
+            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
+            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
+        )
+        if cfg.explore:
+            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
+        agent = BiRoLFLasso_old(**kw)
+
+    elif agent_type == "birolf_lasso":
+        kw = dict(
+            M=M, N=N, sigma=noise_std, delta=cfg.delta, p=cfg.p,
+            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
+            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
+            fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+            fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+            kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+            kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+        )
+        if cfg.explore:
+            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
+        agent = BiRoLFLasso(**kw)
+
+    elif agent_type == "birolf_lasso_blockwise":
+        kw = dict(
+            M=M, N=N, d_x=d_x, d_y=d_y,
+            sigma=noise_std, delta=cfg.delta, p=cfg.p,
+            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
+            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
+            fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+            fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+            kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+            kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+            block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+            block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+            block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+            block_tol=getattr(cfg, "block_tol", 1e-6),
+            block_use_fista=getattr(cfg, "block_use_fista", True),
+            block_use_batched=getattr(cfg, "block_use_batched", True),
+        )
+        if cfg.explore:
+            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
+        agent = BiRoLFLasso_Blockwise(**kw)
+
+    elif agent_type == "birolf_lasso_blockwise_imputation":
+        kw = dict(
+            M=M, N=N, d_x=d_x, d_y=d_y,
+            sigma=noise_std, delta=cfg.delta, p=cfg.p,
+            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
+            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
+            fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+            fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+            kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+            kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+            block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+            block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+            block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+            block_tol=getattr(cfg, "block_tol", 1e-6),
+            block_use_fista=getattr(cfg, "block_use_fista", True),
+            block_use_batched=getattr(cfg, "block_use_batched", True),
+        )
+        if cfg.explore:
+            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
+        agent = BiRoLFLasso_Blockwise_Imputation(**kw)
+
+    elif agent_type == "estr_lowoful":
+        agent = ESTRLowOFUL(
+            d1=d_x, d2=d_y,
+            r=getattr(cfg, 'estr_r', min(d_x, d_y)),
+            T1=getattr(cfg, 'estr_T1', M * N),
+            lam=getattr(cfg, 'estr_lam', cfg.p),
+            lam_perp=getattr(cfg, 'estr_lam_perp', cfg.p),
+            B=getattr(cfg, 'estr_B', 1.0),
+            B_perp=getattr(cfg, 'estr_B_perp', 1.0),
+            delta=cfg.delta, sigma=noise_std,
+        )
+
+    elif agent_type == "jang_efalb":
+        agent = JangEpsilonFALB(T=horizon, delta=cfg.delta, sigma=noise_std)
+
+    elif agent_type == "jang_roucb":
+        agent = JangRoUCB(
+            rank=cfg.jang_rank if cfg.jang_rank is not None else min(d_x, d_y),
+            delta=cfg.delta, sigma=noise_std,
+            beta_scale=getattr(cfg, "jang_beta_scale", 1.0),
+        )
+
+    # ── Feature augmentation for RoLF-class agents ───────────────────────
+    if isinstance(agent, (LinUCB, LinTS, DRLassoBandit, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
+        data_x = X.T
+        data_y = Y.T
+    else:
+        basis_X = orthogonal_complement_basis(X)
+        basis_Y = orthogonal_complement_basis(Y)
+        d_X, M_ = X.shape
+        data_x   = np.hstack((X.T, basis_X)) if d_X <= M_ else basis_X
+        d_Y, N_  = Y.shape
+        data_y   = np.hstack((Y.T, basis_Y)) if d_Y <= N_ else basis_Y
+
+    # ── Timing setup ─────────────────────────────────────────────────────
+    if agent.__class__.__name__ in [
+        'RoLFLasso', 'BiRoLFLasso_old', 'BiRoLFLasso',
+        'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit',
+    ]:
+        agent._timing_data    = timing_data
+        agent._trial          = now_trial
+        agent._benchmark_mode = getattr(cfg, "benchmark_mode", False)
+        agent._profile_ops    = getattr(cfg, "profile_ops", False)
+
+    trial_start = time.perf_counter()
+    regrets = bilinear_run(
+        trial=now_trial, agent=agent, horizon=horizon,
+        exp_rewards_mat=exp_rewards_mat,
+        x=data_x, y=data_y,
+        noise_dist=cfg.reward_dist, noise_std=noise_std,
+        verbose=verbose, fname=fname, timing_data=timing_data,
+        log_context=dict(
+            M=M, N=N, d_x=d_x, d_y=d_y, d_x_star=d_x_star, d_y_star=d_y_star,
+        ),
+    )
+    trial_total_time = time.perf_counter() - trial_start
+
+    agent_name = agent.__class__.__name__
+    if timing_data is not None:
+        timing_data.setdefault('total_execution_times', {}).setdefault(agent_name, []).append(trial_total_time)
+
+    regret_container[0] = regrets
+    return regret_container
+
+
+def bilinear_run_agent_movie(args):
+    """Worker function for run_movieLens (multiprocessing)."""
+    trial_agent, _shared1, _shared2, movie_ids, user_ids, d_unobs_movie, d_unobs_user = args
+    now_trial, agent_type = trial_agent
+    _maybe_set_blas_threads()
+    np.random.seed(cfg.seed + 513 * now_trial)
+
+    start = time.perf_counter()
+    local_timing_data = {"optimization": {}, "breakdown": {}, "iters": {}}
+
+    X_star, X, Y_star, Y, exp_rewards_mat, M, N, d_x, d_y, d_x_star, d_y_star = \
+        do_movie_experiment(
+            case=cfg.case,
+            d_unobs_movie=d_unobs_movie,
+            d_unobs_user=d_unobs_user,
+            movie_ids=movie_ids,
+            user_ids=user_ids,
+        )
+
+    target_case = {4: 3, 5: 4}.get(cfg.case, cfg.case)
+    fname = (
+        f"MovieLens_Seed_{cfg.seed}_Case_{target_case}_Agent_{agent_type}"
+        f"_M_{M}_N_{N}_xstar_{d_x_star}_ystar_{d_y_star}"
+        f"_dx_{d_x}_dy_{d_y}_T_{cfg.horizon}_run_{RUN_TAG}"
+    )
+
+    regrets = bilinear_run_trial_movie(
+        agent_type=agent_type,
+        now_trial=now_trial,
+        horizon=cfg.horizon,
+        X_star=X_star, X=X, Y_star=Y_star, Y=Y,
+        exp_rewards_mat=exp_rewards_mat,
+        M=M, N=N, d_x=d_x, d_y=d_y, d_x_star=d_x_star, d_y_star=d_y_star,
+        noise_std=cfg.reward_std,
+        case=cfg.case,
+        verbose=True,
+        fname=fname,
+        timing_data=local_timing_data,
+    )
+
+    end = time.perf_counter()
+
+    agent_display_name = AGENT_DICT[agent_type]
+    timing_file = (
+        f"/tmp/timing_movie_{agent_type}_{now_trial}"
+        f"_M_{M}_N_{N}_run_{RUN_TAG}.pkl"
+    )
+    timing_info = {
+        'optimization_times': local_timing_data.get('optimization', local_timing_data),
+        'timing_breakdown':    local_timing_data.get('breakdown', {}),
+        'timing_iters':        local_timing_data.get('iters', {}),
+        'total_time':          end - start,
+        'agent_name':          agent_display_name,
+        'trial':               now_trial,
+    }
+    try:
+        with open(timing_file, 'wb') as f:
+            pickle.dump(timing_info, f)
+    except Exception as e:
+        print(f"Warning: Could not save timing data: {e}")
+
+    return (now_trial, agent_display_name), regrets, end - start, timing_file
+
+
+def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
+    """
+    Run a MovieLens bilinear bandit experiment, following the run_main() workflow.
+
+    Parameters
+    ----------
+    sampling : bool
+        If True, randomly sample n_sample movies and n_sample users.
+    n_sample : int
+        Number of movies / users to sample when sampling=True.
+    """
+    global cfg, date, RUN_TAG, RESULT_PATH, FIGURE_PATH, LOG_PATH
+    global TIMING_DATA, TIMING_BREAKDOWN, TIMING_ITERS, TOTAL_EXECUTION_TIMES
+
+    if given_cfg is None:
+        cfg = get_cfg()
+    else:
+        cfg = given_cfg
+        
+    date    = datetime.now().strftime('%Y-%m-%d')
+    RUN_TAG = dt.now().strftime("%H%M")
+
+    # ── Optional sampling of movies / users ──────────────────────────────
+    if sampling and n_sample > 0:
+        from open_movieLens import read_movies, read_users
+        all_movies_df = read_movies()
+        all_users_df  = read_users()
+        np.random.seed(cfg.seed)
+        n_movies   = min(n_sample, len(all_movies_df))
+        n_users    = min(n_sample, len(all_users_df))
+        movie_ids  = np.random.choice(all_movies_df['MovieID'].values, n_movies, replace=False)
+        user_ids   = np.random.choice(all_users_df['UserID'].values,  n_users,  replace=False)
+    else:
+        movie_ids = None
+        user_ids  = None
+
+    d_unobs_movie = getattr(cfg, 'movie_d_unobs', 4)
+    d_unobs_user  = getattr(cfg, 'user_d_unobs',  4)
+
+    # Peek at data dimensions for path naming (uses a fixed seed so it is stable)
+    np.random.seed(cfg.seed)
+    _, _, _, _, _, M, N, d_x, d_y, d_x_star, d_y_star = do_movie_experiment(
+        case=cfg.case,
+        d_unobs_movie=d_unobs_movie,
+        d_unobs_user=d_unobs_user,
+        movie_ids=movie_ids,
+        user_ids=user_ids,
+    )
+
+    target_case = {4: 3, 5: 4}.get(cfg.case, cfg.case)
+    target_path = (
+        f"4. Rebuttal/movieLens_exp_{cfg.init_explore}_seed_{cfg.seed}"
+        f"_M_{M}_N_{N}_dim_{d_x}_true_dim_{d_x_star}"
+    )
+    RESULT_PATH = (
+        f"{MOTHER_PATH}/{target_path}/results/{date}"
+        f"/case_{target_case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    )
+    FIGURE_PATH = (
+        f"{MOTHER_PATH}/{target_path}/figures/{date}"
+        f"/case_{target_case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    )
+    LOG_PATH = (
+        f"{MOTHER_PATH}/{target_path}/logs/{date}"
+        f"/case_{target_case}_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
+    )
+
+    _maybe_set_blas_threads()
+
+    AGENTS = [
+        "birolf_lasso",
+        "birolf_lasso_blockwise",
+        "birolf_lasso_blockwise_imputation",
+        "rolf_lasso",
+        "dr_lasso",
+        "mab_ucb",
+        "estr_lowoful",
+        "jang_roucb",
+        "jang_efalb",
+    ]
+
+    TRIALS_AGENTS = [(_trial, _agent) for _agent in AGENTS for _trial in range(cfg.trials)]
+    worker_args   = [
+        (ta, None, None, movie_ids, user_ids, d_unobs_movie, d_unobs_user)
+        for ta in TRIALS_AGENTS
+    ]
+
+    if getattr(cfg, "sequential_benchmark", False):
+        results = list(map(bilinear_run_agent_movie, worker_args))
+    else:
+        with ProcessPoolExecutor(
+            max_workers=16,
+            initializer=_init_worker,
+            initargs=(cfg, RESULT_PATH, FIGURE_PATH, LOG_PATH, RUN_TAG),
+        ) as executor:
+            results = list(executor.map(bilinear_run_agent_movie, worker_args))
+
+    regret_results = {}
+    time_check     = {}
+    timing_files   = []
+
+    for key, regrets, elapsed, timing_file in results:
+        now_trial, agent_type = key
+        if agent_type not in regret_results:
+            regret_results[agent_type] = np.zeros(cfg.trials, dtype=object)
+            time_check[agent_type]     = elapsed
+        regret_results[agent_type][now_trial] = regrets[0]
+        time_check[agent_type] += elapsed
+        if timing_file:
+            timing_files.append(timing_file)
+
+    # ── Load timing data from temp files (same as run_main) ──────────────
+    for timing_file in timing_files:
+        try:
+            with open(timing_file, 'rb') as f:
+                timing_info = pickle.load(f)
+
+            opt_times = timing_info.get('optimization_times', {})
+            if opt_times:
+                for cls, trial_data in opt_times.items():
+                    TIMING_DATA.setdefault(cls, {})
+                    for tn, ts in trial_data.items():
+                        TIMING_DATA[cls].setdefault(tn, []).extend(ts)
+
+            breakdown = timing_info.get('timing_breakdown', {})
+            if breakdown:
+                for cls, trial_data in breakdown.items():
+                    TIMING_BREAKDOWN.setdefault(cls, {})
+                    for tn, metrics in trial_data.items():
+                        store = TIMING_BREAKDOWN[cls].setdefault(tn, {
+                            k: [] for k in ("choose", "update", "impute", "main", "overhead")
+                        })
+                        for k in store:
+                            store[k].extend(metrics.get(k, []))
+
+            iters = timing_info.get('timing_iters', {})
+            if iters:
+                for cls, trial_data in iters.items():
+                    TIMING_ITERS.setdefault(cls, {})
+                    for tn, metrics in trial_data.items():
+                        store = TIMING_ITERS[cls].setdefault(tn, {
+                            k: [] for k in (
+                                "impute_iters", "main_iters",
+                                "block_oo_iters", "block_ou_iters", "block_uo_iters",
+                            )
+                        })
+                        for k in store:
+                            store[k].extend(metrics.get(k, []))
+
+            agent_name = timing_info['agent_name']
+            trial_num  = timing_info['trial']
+            total_time = timing_info['total_time']
+            TOTAL_EXECUTION_TIMES.setdefault(agent_name, [])
+            while len(TOTAL_EXECUTION_TIMES[agent_name]) <= trial_num:
+                TOTAL_EXECUTION_TIMES[agent_name].append(0)
+            TOTAL_EXECUTION_TIMES[agent_name][trial_num] = total_time
+
+            os.remove(timing_file)
+        except Exception as e:
+            print(f"Warning: Could not load timing data from {timing_file}: {e}")
+
+    T   = cfg.horizon
+    fig = bilinear_show_result(regrets=regret_results, horizon=T, fontsize=15)
+    fname = (
+        f"MovieLens_Case_{target_case}_M_{M}_N_{N}"
+        f"_xstar_{d_x_star}_ystar_{d_y_star}"
+        f"_dx_{d_x}_dy_{d_y}_T_{T}"
+        f"_explored_{cfg.init_explore}_noise_{cfg.reward_std}_run_{RUN_TAG}"
+    )
+
+    save_plot(fig, path=FIGURE_PATH, time_check=time_check, fname=fname)
+    save_result(
+        result=(vars(cfg), regret_results),
+        time_check=time_check,
+        path=RESULT_PATH,
+        fname=fname,
+        filetype=cfg.filetype,
+    )
+
+    print("\n" + "="*80)
+    print("GENERATING TIMING ANALYSIS PLOTS")
+    print("="*80)
+    plot_timing_analysis()
+    print("All plots and results saved successfully!")
+
 
 if __name__ == "__main__":
     run_main()
