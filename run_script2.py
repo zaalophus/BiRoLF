@@ -120,7 +120,7 @@ if __name__ == "__main__":
     # run_main(now_script.cfg)
     
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
-    for seed in [555,21234,624,651,154,726,943]:
+    for seed in [124212,23,4323,336,432,36,64,53257,324]:
         for true_dim in [15,20,25]:
             for num_arm in [20,30,25]:
                 for dim in [7, 10,12]:

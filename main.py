@@ -2098,18 +2098,14 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
 
     # ── Optional sampling of movies / users ──────────────────────────────
     if sampling and n_sample > 0:
-        from open_movieLens import read_movies, read_users, read_ratings
-        all_movies_df = read_movies()
+        from open_movieLens import read_ratings
         all_ratings_df = read_ratings()
         np.random.seed(cfg.seed)
-        # Step 1: sample movies
-        n_movies  = min(n_sample, len(all_movies_df))
-        movie_ids = np.random.choice(all_movies_df['MovieID'].values, n_movies, replace=False)
-        # Step 2: keep only users who have rated at least one sampled movie
-        valid_user_ids = all_ratings_df[
-            all_ratings_df['MovieID'].isin(movie_ids)
-        ]['UserID'].unique()
-        user_ids = valid_user_ids
+        # Sample n_sample ratings, then extract unique movies and users from them
+        n_ratings = min(n_sample, len(all_ratings_df))
+        sampled_ratings = all_ratings_df.sample(n=n_ratings, random_state=cfg.seed)
+        movie_ids = sampled_ratings['MovieID'].unique()
+        user_ids  = sampled_ratings['UserID'].unique()
     else:
         movie_ids = None
         user_ids  = None
