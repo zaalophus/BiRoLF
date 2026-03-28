@@ -165,7 +165,7 @@ if __name__ == "__main__":
                             seed = seed,
                             kappa_cap_percentile = 0)
                         # run_main(now_script.cfg)
-                        run_movieLens(now_script.cfg,sampling=True,n_sample=20)
+                        run_movieLens(now_script.cfg,sampling=True,n_sample=25)
                         
                         
                         

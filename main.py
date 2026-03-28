@@ -1597,6 +1597,32 @@ def run_main(given_cfg = None):
 # MovieLens Experiment
 # ============================================================
 
+_ST_MODEL = None  # module-level cache so the model is loaded only once per process
+
+def _st_embed(texts, model_name: str = "BAAI/bge-base-en-v1.5") -> np.ndarray:
+    """
+    Embed a list of strings with a pre-trained sentence-transformers model.
+
+    The SentenceTransformer instance is cached at module level so it is loaded
+    only once per process even when called multiple times.
+
+    Parameters
+    ----------
+    texts      : array-like of str
+    model_name : sentence-transformers model identifier
+                 default: all-MiniLM-L6-v2  (384-dim, fast, CPU-friendly)
+
+    Returns
+    -------
+    np.ndarray of shape (embedding_dim, N)
+    """
+    global _ST_MODEL
+    from sentence_transformers import SentenceTransformer
+    if _ST_MODEL is None:
+        _ST_MODEL = SentenceTransformer(model_name)
+    emb = _ST_MODEL.encode(list(texts), show_progress_bar=False, convert_to_numpy=True)
+    return emb.T  # (embedding_dim, N)
+
 def do_movie_experiment(
     case: int,
     d_unobs_movie: int = 4,
@@ -1643,16 +1669,29 @@ def do_movie_experiment(
     yr_min, yr_max = movies_df['Year'].min(), movies_df['Year'].max()
     movies_df['Year_norm'] = (movies_df['Year'] - yr_min) / max(float(yr_max - yr_min), 1.0)
 
-    all_genres = sorted({g for gs in movies_df['Genres'] for g in gs.split('|')})
-    genre_mat  = np.array(
-        [[1.0 if g in row.split('|') else 0.0 for g in all_genres]
-         for row in movies_df['Genres']]
-    ).T  # (n_genres, M)
-
     movie_year = movies_df['Year_norm'].values[np.newaxis, :]  # (1, M)
-    X_obs = np.concatenate([movie_year, genre_mat], axis=0).astype(float)  # (d_x, M)
-    d_x   = X_obs.shape[0]
+
+    # Title embedding via pre-trained sentence-transformers (384-dim per movie)
+    title_emb = _st_embed(movies_df['Title'].values)   # (384, M)
+
+    # Genre embedding: embed each movie's genre string (e.g. "Action|Comedy|Drama")
+    # so semantic genre similarity is captured beyond one-hot indicators
+    # Genre embedding: embed each genre label separately, then mean-pool per movie
+    # e.g. "Action|Comedy|Drama" → embed("Action"), embed("Comedy"), embed("Drama") → mean
+    genre_emb = np.stack([
+        np.mean(_st_embed(genres_str.split('|')), axis=1)
+        for genres_str in movies_df['Genres'].values
+    ], axis=1)  # (embedding_dim, M)
+
+    X_obs = np.concatenate([movie_year, title_emb, genre_emb], axis=0).astype(float)
     M     = X_obs.shape[1]
+
+    # Guard: d_x must be strictly less than M so orthogonal_complement_basis
+    # has at least one null direction (augmented feature dim = M always)
+    if X_obs.shape[0] >= M:
+        X_obs = X_obs[:max(M - 1, 1), :]
+
+    d_x   = X_obs.shape[0]
     all_movie_ids = movies_df['MovieID'].values
 
     # ── observable user features ─────────────────────────────────────────
@@ -2059,14 +2098,18 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
 
     # ── Optional sampling of movies / users ──────────────────────────────
     if sampling and n_sample > 0:
-        from open_movieLens import read_movies, read_users
+        from open_movieLens import read_movies, read_users, read_ratings
         all_movies_df = read_movies()
-        all_users_df  = read_users()
+        all_ratings_df = read_ratings()
         np.random.seed(cfg.seed)
-        n_movies   = min(n_sample, len(all_movies_df))
-        n_users    = min(n_sample, len(all_users_df))
-        movie_ids  = np.random.choice(all_movies_df['MovieID'].values, n_movies, replace=False)
-        user_ids   = np.random.choice(all_users_df['UserID'].values,  n_users,  replace=False)
+        # Step 1: sample movies
+        n_movies  = min(n_sample, len(all_movies_df))
+        movie_ids = np.random.choice(all_movies_df['MovieID'].values, n_movies, replace=False)
+        # Step 2: keep only users who have rated at least one sampled movie
+        valid_user_ids = all_ratings_df[
+            all_ratings_df['MovieID'].isin(movie_ids)
+        ]['UserID'].unique()
+        user_ids = valid_user_ids
     else:
         movie_ids = None
         user_ids  = None
