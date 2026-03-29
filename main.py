@@ -1671,18 +1671,22 @@ def do_movie_experiment(
 
     movie_year = movies_df['Year_norm'].values[np.newaxis, :]  # (1, M)
 
-    # Title embedding via pre-trained sentence-transformers (384-dim per movie)
-    title_emb = _st_embed(movies_df['Title'].values)   # (384, M)
+    # Title embedding: pre-trained model → truncated SVD → top-10 components
+    title_emb_full = _st_embed(movies_df['Title'].values)          # (384, M)
+    k_title = min(10, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
+    _, S_t, Vt_t = np.linalg.svd(title_emb_full, full_matrices=False)
+    title_emb = np.diag(S_t[:k_title]) @ Vt_t[:k_title, :]        # (10, M)
 
-    # Genre embedding: embed each movie's genre string (e.g. "Action|Comedy|Drama")
-    # so semantic genre similarity is captured beyond one-hot indicators
-    # Genre embedding: embed each genre label separately, then mean-pool per movie
-    # e.g. "Action|Comedy|Drama" → embed("Action"), embed("Comedy"), embed("Drama") → mean
-    genre_emb = np.stack([
+    # Genre embedding: mean-pool per-genre embeddings → truncated SVD → top-10 components
+    genre_emb_full = np.stack([
         np.mean(_st_embed(genres_str.split('|')), axis=1)
         for genres_str in movies_df['Genres'].values
-    ], axis=1)  # (embedding_dim, M)
+    ], axis=1)                                                      # (384, M)
+    k_genre = min(10, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
+    _, S_g, Vt_g = np.linalg.svd(genre_emb_full, full_matrices=False)
+    genre_emb = np.diag(S_g[:k_genre]) @ Vt_g[:k_genre, :]        # (10, M)
 
+    # d_obs = 1 (year) + 10 (title) + 10 (genre) = 21
     X_obs = np.concatenate([movie_year, title_emb, genre_emb], axis=0).astype(float)
     M     = X_obs.shape[1]
 
