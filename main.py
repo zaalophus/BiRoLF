@@ -11,6 +11,8 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
+EXPERIMENT_COMMENT = ""
+
 MOTHER_PATH = "."
 
 DIST_DICT = {"gaussian": "g", "uniform": "u"}
@@ -1408,7 +1410,7 @@ def run_main(given_cfg = None):
     date = datetime.now().strftime('%Y-%m-%d')
     RUN_TAG = dt.now().strftime("%H%M")
 
-    target_path = f"4. Rebuttal/exp_{cfg.init_explore}_seed_{cfg.seed}_arm_{cfg.arm_x}_dim_{cfg.dim_x}_true_dim_{cfg.true_dim_x}"
+    target_path = f"4. Rebuttal/exp_{EXPERIMENT_COMMENT}_{cfg.init_explore}_seed_{cfg.seed}_arm_{cfg.arm_x}_dim_{cfg.dim_x}_true_dim_{cfg.true_dim_x}"
     if cfg.case == 4:
         RESULT_PATH = f"{MOTHER_PATH}/{target_path}/results/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
         FIGURE_PATH = f"{MOTHER_PATH}/{target_path}/figures/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
@@ -2129,7 +2131,7 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
 
     target_case = {4: 3, 5: 4}.get(cfg.case, cfg.case)
     target_path = (
-        f"4. Rebuttal/movieLens_exp_{cfg.init_explore}_seed_{cfg.seed}"
+        f"4. Rebuttal/movieLens_{EXPERIMENT_COMMENT}_exp_{cfg.init_explore}_seed_{cfg.seed}"
         f"_M_{M}_N_{N}_dim_{d_x}_true_dim_{d_x_star}"
     )
     RESULT_PATH = (
