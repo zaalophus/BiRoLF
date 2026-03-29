@@ -59,114 +59,54 @@ class Script:
      
 if __name__ == "__main__":
     cfg = get_cfg()
-    # now_script = Script(cfg,
-    #                     trials=5,
-    #                     horizon=3000,
-    #                     arm_x=20,
-    #                     arm_y=20,
-    #                     true_dim_x=10,
-    #                     true_dim_y=10,
-    #                     dim_x=7,
-    #                     dim_y=7,
-    #                     case=2,
-    #                     explore=True,
-    #                     init_explore="double",
-    #                     timing_breakdown=True,
-    #                     profile_ops=True,
-    #                     timing_log_every=50,
-    #                     sequential_benchmark=True,
-    #                     seed = 5421,
-    #                     kappa_cap_percentile = 0.0)
-    # run_main(now_script.cfg)
-    
-    # now_script = Script(cfg,
-    #                     trials=5,
-    #                     horizon=3000,
-    #                     arm_x=25,
-    #                     arm_y=25,
-    #                     true_dim_x=20,
-    #                     true_dim_y=20,
-    #                     dim_x=10,
-    #                     dim_y=10,
-    #                     case=4,
-    #                     explore=True,
-    #                     init_explore="double",
-    #                     timing_breakdown=True,
-    #                     profile_ops=True,
-    #                     timing_log_every=50,
-    #                     sequential_benchmark=True,
-    #                     seed = 1212,
-    #                     kappa_cap_percentile = 0.0)
-    # run_main(now_script.cfg)
-    
-    # now_script = Script(cfg,
-    #                     trials=5,
-    #                     horizon=3000,
-    #                     arm_x=25,
-    #                     arm_y=25,
-    #                     true_dim_x=15,
-    #                     true_dim_y=15,
-    #                     dim_x=10,
-    #                     dim_y=10,
-    #                     case=5,
-    #                     explore=True,
-    #                     init_explore="double",
-    #                     timing_breakdown=True,
-    #                     profile_ops=True,
-    #                     timing_log_every=50,
-    #                     sequential_benchmark=True,
-    #                     seed = 1234,
-    #                     kappa_cap_percentile = 0.0)
-    # run_main(now_script.cfg)
-    
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
 
-    # for seed in [5151,1512,12534,352,31]:
-    #     for case in [1,2,4,5]:
-    #         now_script = Script(cfg,
-    #             trials=5,
-    #             horizon=9000,
-    #             case=case,
-    #             explore=True,
-    #             init_explore="half",
-    #             timing_breakdown=True,
-    #             profile_ops=True,
-    #             timing_log_every=50,
-    #             sequential_benchmark=True,
-    #             seed = seed,
-    #             kappa_cap_percentile = 0)
-    #         # run_main(now_script.cfg)
-    #         run_movieLens(now_script.cfg,sampling=True,n_sample=30)
+    for seed in [167,868,72151,12,468,752,18572,678,342,1426,786,835,1582]:
+        for case in [1,2,4,5]:
+            now_script = Script(cfg,
+                trials=5,
+                horizon=9000,
+                case=case,
+                explore=True,
+                init_explore="half",
+                timing_breakdown=True,
+                profile_ops=True,
+                timing_log_every=50,
+                sequential_benchmark=True,
+                seed = seed,
+                kappa_cap_percentile = 0)
+            # run_main(now_script.cfg)
+            run_movieLens(now_script.cfg,sampling=True,n_sample=30)
                         
                         
-    list_seed = [354,6516,265,452,1432,124,5236,768,798,97867]
-    list_true_dim = [15,20,25]
-    list_num_arm = [20,30,25]
-    list_dim = [7, 10,12]
-    list_horizon = [4000,9000,12500]
-    list_case = [1,2,4,5]
+    # list_seed = [354,6516,265,452,1432,124,5236,768,798,97867]
+    # list_true_dim = [15,20,25]
+    # list_num_arm = [20,30,25]
+    # list_dim = [7, 10,12]
+    # list_horizon = [4000,9000,12500]
+    # list_case = [1,2,4,5]
     
-    for seed in list_seed:
-        for case in list_case:
-            for true_dim, num_arm, dim, hor in zip(list_true_dim, list_num_arm, list_dim, list_horizon):
-                now_script = Script(cfg,
-                            trials=5,
-                            horizon=hor,
-                            arm_x=num_arm,
-                            arm_y=num_arm,
-                            true_dim_x=true_dim,
-                            true_dim_y=true_dim,
-                            dim_x=dim,
-                            dim_y=dim,
-                            case=case,
-                            explore=True,
-                            init_explore="half",
-                            timing_breakdown=True,
-                            profile_ops=True,
-                            timing_log_every=50,
-                            sequential_benchmark=True,
-                            seed = seed,
-                            kappa_cap_percentile = 0)
-                run_main(now_script.cfg)
+    # for seed in list_seed:
+    #     for case in list_case:
+    #         for true_dim, num_arm, dim, hor in zip(list_true_dim, list_num_arm, list_dim, list_horizon):
+    #             now_script = Script(cfg,
+    #                         trials=5,
+    #                         horizon=hor,
+    #                         arm_x=num_arm,
+    #                         arm_y=num_arm,
+    #                         true_dim_x=true_dim,
+    #                         true_dim_y=true_dim,
+    #                         dim_x=dim,
+    #                         dim_y=dim,
+    #                         case=case,
+    #                         explore=True,
+    #                         init_explore="half",
+    #                         timing_breakdown=True,
+    #                         profile_ops=True,
+    #                         timing_log_every=50,
+    #                         sequential_benchmark=True,
+    #                         seed = seed,
+    #                         kappa_cap_percentile = 0)
+    #             run_main(now_script.cfg)
     
     

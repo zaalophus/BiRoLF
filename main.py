@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
-EXPERIMENT_COMMENT = ""
+EXPERIMENT_COMMENT = "EMB_LIMIT_10"
 
 MOTHER_PATH = "."
 
@@ -725,6 +725,7 @@ def bilinear_run(
             _dys   = _lc.get('d_y_star', cfg.true_dim_y)
             _dx    = _lc.get('d_x',      cfg.dim_x)
             _dy    = _lc.get('d_y',      cfg.dim_y)
+            _comment    = _lc.get('comment',      "Normal")
             try:
                 string = f"""
                         case : {cfg.case}, SEED : {cfg.seed}, M : {_M}, N: {_N},
@@ -743,7 +744,7 @@ def bilinear_run(
                 
             save_log(path=LOG_PATH, fname=fname, string=" ".join(string.split()))
             if t % 100 == 0:
-                print(" ".join(string.split()))
+                print(_comment+" ".join(string.split()))
 
         ## compute the regret
         regrets[t] = optimal_reward - exp_rewards_mat[chosen_i, chosen_j]
@@ -2003,7 +2004,7 @@ def bilinear_run_trial_movie(
         noise_dist=cfg.reward_dist, noise_std=noise_std,
         verbose=verbose, fname=fname, timing_data=timing_data,
         log_context=dict(
-            M=M, N=N, d_x=d_x, d_y=d_y, d_x_star=d_x_star, d_y_star=d_y_star,
+            M=M, N=N, d_x=d_x, d_y=d_y, d_x_star=d_x_star, d_y_star=d_y_star, comment = "MovieLens"
         ),
     )
     trial_total_time = time.perf_counter() - trial_start
