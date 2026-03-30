@@ -65,10 +65,10 @@ if __name__ == "__main__":
     cfg = get_cfg()
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
 
-    d_unobs_movie = 20
-    d_unobs_user = 20
+    d_unobs_movie = 10
+    d_unobs_user = 10
     
-    for seed in range(2031,2041):
+    for seed in range(4051,4061):
         for case in [1,2,4,5]:
             now_script = Script(cfg,
                 trials=5,
@@ -84,7 +84,7 @@ if __name__ == "__main__":
                 kappa_cap_percentile = 0,
                 d_unobs_movie = d_unobs_movie,
                 d_unobs_user = d_unobs_user,)
-            run_movieLens(now_script.cfg,sampling=True,n_sample=40)
+            run_movieLens(now_script.cfg,sampling=True,n_sample=25)
                         
                         
     # list_seed = [2111,2112,2113,2114,2115,2116,2117,2118,2119,2120]

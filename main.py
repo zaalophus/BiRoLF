@@ -658,7 +658,7 @@ def bilinear_run_trial(
     # print(f"Agent : {agent.__class__.__name__}\t data shape : {data.shape}")
 
     # Set timing data for BiRoLF agents
-    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
+    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
         agent._timing_data = timing_data
         agent._trial = now_trial
         agent._benchmark_mode = getattr(cfg, "benchmark_mode", False)
