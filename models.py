@@ -1045,292 +1045,292 @@ class LassoBandit(ContextualBandit):
         return loss + (lam * l1norm)
 
 
-class BiRoLFLasso_old(ContextualBandit):
-    def __init__(
-        self,
-        M: int,
-        N: int,
-        sigma: float,
-        delta: float,
-        p: float,
-        p1: float = None,
-        p2: float = None,
-        explore: bool = False,
-        init_explore: int = 0,
-        theoretical_init_explore: bool = False,
-        lam_c_impute: float = 1.0,
-        lam_c_main: float = 1.0,
-    ):
-        # Regularization scale multipliers (tunable from outside)
-        self.lam_c_impute = lam_c_impute
-        self.lam_c_main = lam_c_main
+# class BiRoLFLasso_old(ContextualBandit):
+#     def __init__(
+#         self,
+#         M: int,
+#         N: int,
+#         sigma: float,
+#         delta: float,
+#         p: float,
+#         p1: float = None,
+#         p2: float = None,
+#         explore: bool = False,
+#         init_explore: int = 0,
+#         theoretical_init_explore: bool = False,
+#         lam_c_impute: float = 1.0,
+#         lam_c_main: float = 1.0,
+#     ):
+#         # Regularization scale multipliers (tunable from outside)
+#         self.lam_c_impute = lam_c_impute
+#         self.lam_c_main = lam_c_main
 
-        self.t = 0
-        self.explore = explore
-        self.init_explore = init_explore
-        ## TODO: make theoretical C_e
-        if theoretical_init_explore:
-            # self.init_explore = ((8*M*N)**3)
-            pass
-        self.M = M
-        self.N = N
-        self.delta = delta
+#         self.t = 0
+#         self.explore = explore
+#         self.init_explore = init_explore
+#         ## TODO: make theoretical C_e
+#         if theoretical_init_explore:
+#             # self.init_explore = ((8*M*N)**3)
+#             pass
+#         self.M = M
+#         self.N = N
+#         self.delta = delta
         
-        self.p = p
-        # p1과 p2가 별도로 지정되지 않으면 p 값을 사용
-        self.p1 = p1 if p1 is not None else p
-        self.p2 = p2 if p2 is not None else p
+#         self.p = p
+#         # p1과 p2가 별도로 지정되지 않으면 p 값을 사용
+#         self.p1 = p1 if p1 is not None else p
+#         self.p2 = p2 if p2 is not None else p
         
-        self.sigma = sigma
+#         self.sigma = sigma
 
-        self.action_i_history = []
-        self.action_j_history = []
-        self.reward_history = []
+#         self.action_i_history = []
+#         self.action_j_history = []
+#         self.reward_history = []
 
-        self.matching = dict()
-        self.Phi_hat = np.zeros((self.M, self.N))
-        self.Phi_check = np.zeros((self.M, self.N))
-        self.impute_prev = np.zeros((self.M, self.N))
-        self.main_prev = np.zeros((self.M, self.N))
-        self._arm_indices = np.arange(self.M * self.N)
-        self._profile_ops = False
+#         self.matching = dict()
+#         self.Phi_hat = np.zeros((self.M, self.N))
+#         self.Phi_check = np.zeros((self.M, self.N))
+#         self.impute_prev = np.zeros((self.M, self.N))
+#         self.main_prev = np.zeros((self.M, self.N))
+#         self._arm_indices = np.arange(self.M * self.N)
+#         self._profile_ops = False
 
-    def choose(self, x: np.ndarray, y: np.ndarray):
-        # x : (M, M) augmented feature matrix where each row denotes the augmented features
-        # y : (N, N) augmented feature matrix where each row denotes the augmented features
+#     def choose(self, x: np.ndarray, y: np.ndarray):
+#         # x : (M, M) augmented feature matrix where each row denotes the augmented features
+#         # y : (N, N) augmented feature matrix where each row denotes the augmented features
 
-        self.t += 1
+#         self.t += 1
 
-        ## compute the \hat{a}_t
-        if self.explore:
-            if self.t > self.init_explore:
-                decision_rule = x @ self.Phi_hat @ y.T
-                # print(f"Decision rule : {decision_rule}")
-                a_hat = np.argmax(decision_rule)
-            else:
-                a_hat = np.random.choice(np.arange(self.M * self.N))
-        else:
-            ## decision_rule : (M,N)
-            decision_rule = x @ self.Phi_hat @ y.T
-            # print(f"Decision rule : {decision_rule}")
-            a_hat = np.argmax(decision_rule)
+#         ## compute the \hat{a}_t
+#         if self.explore:
+#             if self.t > self.init_explore:
+#                 decision_rule = x @ self.Phi_hat @ y.T
+#                 # print(f"Decision rule : {decision_rule}")
+#                 a_hat = np.argmax(decision_rule)
+#             else:
+#                 a_hat = np.random.choice(np.arange(self.M * self.N))
+#         else:
+#             ## decision_rule : (M,N)
+#             decision_rule = x @ self.Phi_hat @ y.T
+#             # print(f"Decision rule : {decision_rule}")
+#             a_hat = np.argmax(decision_rule)
 
-        i_hat, j_hat = action_to_ij(a_hat, self.N)
+#         i_hat, j_hat = action_to_ij(a_hat, self.N)
 
-        self.a_hat = a_hat
-        self._ahat_history = getattr(self, "_ahat_history", {})
-        self._ahat_history[self.t] = a_hat
-        self.i_hat = i_hat
-        self.j_hat = j_hat
-        self._hat_history = getattr(self, "_hat_history", {})
-        self._hat_history[self.t] = (self.i_hat, self.j_hat)
+#         self.a_hat = a_hat
+#         self._ahat_history = getattr(self, "_ahat_history", {})
+#         self._ahat_history[self.t] = a_hat
+#         self.i_hat = i_hat
+#         self.j_hat = j_hat
+#         self._hat_history = getattr(self, "_hat_history", {})
+#         self._hat_history[self.t] = (self.i_hat, self.j_hat)
 
-        ## sampling actions (resample chosen and pseudo until match or max_iter)
-        total_arms = self.M * self.N
-        denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
-        max_iter = int(
-            np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
-        )
+#         ## sampling actions (resample chosen and pseudo until match or max_iter)
+#         total_arms = self.M * self.N
+#         denom = np.log(1.0 / max(1.0 - self.p, 1e-12))
+#         max_iter = int(
+#             np.log(2.0 * ((self.t + 1) ** 2) / self.delta) / max(denom, 1e-12)
+#         )
 
-        chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
-        chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
+#         chosen_dist = np.full(total_arms, (1.0 / np.sqrt(self.t)) / max(total_arms - 1, 1), dtype=float)
+#         chosen_dist[a_hat] = 1 - (1.0 / np.sqrt(self.t))
 
-        pseudo_action = -1
-        chosen_action = -2
-        count = 0
-        while (pseudo_action != chosen_action) and (count <= max_iter):
-            chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
-            pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
-            pseudo_dist[chosen_action] = self.p
-            pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
-            count += 1
+#         pseudo_action = -1
+#         chosen_action = -2
+#         count = 0
+#         while (pseudo_action != chosen_action) and (count <= max_iter):
+#             chosen_action = np.random.choice(self._arm_indices, p=chosen_dist).item()
+#             pseudo_dist = np.full(total_arms, (1.0 - self.p) / max(total_arms - 1, 1), dtype=float)
+#             pseudo_dist[chosen_action] = self.p
+#             pseudo_action = np.random.choice(self._arm_indices, p=pseudo_dist).item()
+#             count += 1
 
-        self.pseudo_action = pseudo_action
-        self.chosen_action = chosen_action
-        return chosen_action
+#         self.pseudo_action = pseudo_action
+#         self.chosen_action = chosen_action
+#         return chosen_action
 
-    def update(self, x: np.ndarray, y: np.ndarray, r: float):
-        # x : (M, M) augmented feature matrix
-        # y : (N, N) augmented feature matrix
-        # r : reward of the chosen_action
-        self._last_impute_time = 0.0
-        self._last_main_time = 0.0
-        self._last_impute_iters = 0
-        self._last_main_iters = 0
-        if self.pseudo_action == self.chosen_action:
-            chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
-            self.action_i_history.append(chosen_i)
-            self.action_j_history.append(chosen_j)
-            self.reward_history.append(r)
+#     def update(self, x: np.ndarray, y: np.ndarray, r: float):
+#         # x : (M, M) augmented feature matrix
+#         # y : (N, N) augmented feature matrix
+#         # r : reward of the chosen_action
+#         self._last_impute_time = 0.0
+#         self._last_main_time = 0.0
+#         self._last_impute_iters = 0
+#         self._last_main_iters = 0
+#         if self.pseudo_action == self.chosen_action:
+#             chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
+#             self.action_i_history.append(chosen_i)
+#             self.action_j_history.append(chosen_j)
+#             self.reward_history.append(r)
 
-        # lam_impute = 2 * self.p * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
-        # lam_main = (1 + 2 / self.p) * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
+#         # lam_impute = 2 * self.p * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
+#         # lam_main = (1 + 2 / self.p) * self.sigma * np.sqrt(2 * self.t * np.log(2 * self.K * (self.t ** 2) / self.delta))
 
-        # lam_impute = self.p * np.sqrt(np.log(self.t))
-        # lam_main = self.p * np.sqrt(np.log(self.t))
+#         # lam_impute = self.p * np.sqrt(np.log(self.t))
+#         # lam_main = self.p * np.sqrt(np.log(self.t))
 
-        # lam_impute = self.p
-        # lam_main = self.p
+#         # lam_impute = self.p
+#         # lam_main = self.p
 
-        kappa_x = np.max(np.abs(x))
-        kappa_y = np.max(np.abs(y))
+#         kappa_x = np.max(np.abs(x))
+#         kappa_y = np.max(np.abs(y))
 
-        lam_impute = self.lam_c_impute * (
-            2 * self.sigma * kappa_x * kappa_y * np.sqrt(2 * self.t * np.log(2 * self.M * self.N * self.t**2 / self.delta))
-        )
-        lam_main = self.lam_c_main * (
-            (4 * self.sigma * kappa_x * kappa_y / self.p) *
-            np.sqrt(2 * self.t * np.log(2 * self.M * self.N * self.t**2 / self.delta))
-        )
+#         lam_impute = self.lam_c_impute * (
+#             2 * self.sigma * kappa_x * kappa_y * np.sqrt(2 * self.t * np.log(2 * self.M * self.N * self.t**2 / self.delta))
+#         )
+#         lam_main = self.lam_c_main * (
+#             (4 * self.sigma * kappa_x * kappa_y / self.p) *
+#             np.sqrt(2 * self.t * np.log(2 * self.M * self.N * self.t**2 / self.delta))
+#         )
 
-        if self.pseudo_action == self.chosen_action:
-            ## compute the imputation estimator
-            i_impute = x[self.action_i_history, :]  # (t, d_x) matrix
-            j_impute = y[self.action_j_history, :]  # (t, d_y) matrix
+#         if self.pseudo_action == self.chosen_action:
+#             ## compute the imputation estimator
+#             i_impute = x[self.action_i_history, :]  # (t, d_x) matrix
+#             j_impute = y[self.action_j_history, :]  # (t, d_y) matrix
 
-            target_impute = np.array(self.reward_history)
-            # print(f"gram_sqrt : {gram_sqrt.shape}")
-            # print(f"impute_prev : {self.impute_prev.shape}")
+#             target_impute = np.array(self.reward_history)
+#             # print(f"gram_sqrt : {gram_sqrt.shape}")
+#             # print(f"impute_prev : {self.impute_prev.shape}")
 
-            impute_shape = self.impute_prev.shape
-            impute_start_time = time.perf_counter()
-            Phi_impute = scipy.optimize.minimize(
-                self.__imputation_loss,
-                self.impute_prev.reshape(-1),
-                args=(i_impute, j_impute, target_impute, lam_impute),
-                method="SLSQP",
-                options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
-            ).x.reshape(impute_shape)
-            self._last_impute_time = time.perf_counter() - impute_start_time
+#             impute_shape = self.impute_prev.shape
+#             impute_start_time = time.perf_counter()
+#             Phi_impute = scipy.optimize.minimize(
+#                 self.__imputation_loss,
+#                 self.impute_prev.reshape(-1),
+#                 args=(i_impute, j_impute, target_impute, lam_impute),
+#                 method="SLSQP",
+#                 options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
+#             ).x.reshape(impute_shape)
+#             self._last_impute_time = time.perf_counter() - impute_start_time
 
-            ## compute the pseudo rewards for the current data
-            pseudo_rewards = x @ Phi_impute @ y.T
-            chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
-            # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
-            w_now = 1.0 / max(self.p, 1e-12)
-            pseudo_rewards[chosen_i, chosen_j] += w_now * (
-                r - (x[chosen_i, :] @ Phi_impute @ y[chosen_j, :].T)
-            )
-            self.matching[self.t] = (
-                (self.pseudo_action == self.chosen_action),
-                x,
-                y,
-                pseudo_rewards,
-                self.chosen_action,
-                r,
-            )
+#             ## compute the pseudo rewards for the current data
+#             pseudo_rewards = x @ Phi_impute @ y.T
+#             chosen_i, chosen_j = action_to_ij(self.chosen_action, self.N)
+#             # Conditional pseudo sampling -> constant 1/p correction for unbiasedness.
+#             w_now = 1.0 / max(self.p, 1e-12)
+#             pseudo_rewards[chosen_i, chosen_j] += w_now * (
+#                 r - (x[chosen_i, :] @ Phi_impute @ y[chosen_j, :].T)
+#             )
+#             self.matching[self.t] = (
+#                 (self.pseudo_action == self.chosen_action),
+#                 x,
+#                 y,
+#                 pseudo_rewards,
+#                 self.chosen_action,
+#                 r,
+#             )
 
-            ## compute the main estimator
+#             ## compute the main estimator
             
-            # Time the lasso optimization for BiRoLFLasso_old
-            optimization_start_time = time.perf_counter()
+#             # Time the lasso optimization for BiRoLFLasso_old
+#             optimization_start_time = time.perf_counter()
             
-            main_prev_shape = self.main_prev.shape
-            Phi_main = scipy.optimize.minimize(
-                self.__main_loss,
-                self.main_prev.reshape(-1),
-                args=(lam_main, self.matching),
-                method="SLSQP",
-                options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
-            ).x.reshape(main_prev_shape)
+#             main_prev_shape = self.main_prev.shape
+#             Phi_main = scipy.optimize.minimize(
+#                 self.__main_loss,
+#                 self.main_prev.reshape(-1),
+#                 args=(lam_main, self.matching),
+#                 method="SLSQP",
+#                 options={"disp": False, "ftol": 1e-6, "maxiter": 10000},
+#             ).x.reshape(main_prev_shape)
             
-            optimization_end_time = time.perf_counter()
-            optimization_time = optimization_end_time - optimization_start_time
-            self._last_main_time = optimization_time
+#             optimization_end_time = time.perf_counter()
+#             optimization_time = optimization_end_time - optimization_start_time
+#             self._last_main_time = optimization_time
             
-            # Record timing data for ablation study
-            if not getattr(self, "_benchmark_mode", False) and hasattr(self, '_timing_data') and self._timing_data is not None:
-                agent_name = self.__class__.__name__
-                trial = getattr(self, '_trial', 0)
-                timing_store = self._timing_data.get("optimization", self._timing_data)
+#             # Record timing data for ablation study
+#             if not getattr(self, "_benchmark_mode", False) and hasattr(self, '_timing_data') and self._timing_data is not None:
+#                 agent_name = self.__class__.__name__
+#                 trial = getattr(self, '_trial', 0)
+#                 timing_store = self._timing_data.get("optimization", self._timing_data)
 
-                # Initialize nested dict structure if needed
-                if agent_name not in timing_store:
-                    timing_store[agent_name] = {}
-                if trial not in timing_store[agent_name]:
-                    timing_store[agent_name][trial] = []
+#                 # Initialize nested dict structure if needed
+#                 if agent_name not in timing_store:
+#                     timing_store[agent_name] = {}
+#                 if trial not in timing_store[agent_name]:
+#                     timing_store[agent_name][trial] = []
 
-                timing_store[agent_name][trial].append(optimization_time)
+#                 timing_store[agent_name][trial].append(optimization_time)
 
-            ## update the Phi_hat
-            self.Phi_hat = Phi_main
-            self.Phi_check = Phi_impute
-        else:
-            self.matching[self.t] = (
-                (self.pseudo_action == self.chosen_action),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+#             ## update the Phi_hat
+#             self.Phi_hat = Phi_main
+#             self.Phi_check = Phi_impute
+#         else:
+#             self.matching[self.t] = (
+#                 (self.pseudo_action == self.chosen_action),
+#                 None,
+#                 None,
+#                 None,
+#                 None,
+#                 None,
+#             )
 
-    # beta is prev Phi
-    def __imputation_loss(
-        self, beta: np.ndarray, X: np.ndarray, Y: np.ndarray, r: np.ndarray, lam: float
-    ):
-        prev_impute = beta.reshape((self.M, self.N))
-        loss = np.sum(np.power(r - np.einsum("ti,ij,tj->t", X, prev_impute, Y), 2))
-        l1_norm = np.sum(np.abs(beta))
-        return loss + (lam * l1_norm)
+#     # beta is prev Phi
+#     def __imputation_loss(
+#         self, beta: np.ndarray, X: np.ndarray, Y: np.ndarray, r: np.ndarray, lam: float
+#     ):
+#         prev_impute = beta.reshape((self.M, self.N))
+#         loss = np.sum(np.power(r - np.einsum("ti,ij,tj->t", X, prev_impute, Y), 2))
+#         l1_norm = np.sum(np.abs(beta))
+#         return loss + (lam * l1_norm)
 
-    # matching_history: (matched,x,y,pseudo_rewards,chosen_action,r,)
-    def __main_loss(self, beta: np.ndarray, lam: float, matching_history: dict):
-        # residuals_list = list()
-        # for _, value in matching_history.items():
-        #     if value[0]:
-        #         residuals_list.append((value[3] - (np.kron(value[1],value[2])@beta)) ** 2)
+#     # matching_history: (matched,x,y,pseudo_rewards,chosen_action,r,)
+#     def __main_loss(self, beta: np.ndarray, lam: float, matching_history: dict):
+#         # residuals_list = list()
+#         # for _, value in matching_history.items():
+#         #     if value[0]:
+#         #         residuals_list.append((value[3] - (np.kron(value[1],value[2])@beta)) ** 2)
 
-        # # Sum all residuals efficiently
-        # residuals_sum = sum(np.sum(residuals) for residuals in residuals_list)
+#         # # Sum all residuals efficiently
+#         # residuals_sum = sum(np.sum(residuals) for residuals in residuals_list)
 
-        # # L1 regularization
-        # l1_norm = np.sum(np.abs(beta))
+#         # # L1 regularization
+#         # l1_norm = np.sum(np.abs(beta))
 
-        # # Total loss
-        # return residuals_sum + lam * l1_norm
+#         # # Total loss
+#         # return residuals_sum + lam * l1_norm
 
-        # Extract matched keys and data
-        matched_keys = [
-            key for key, value in matching_history.items() if value[0]
-        ]  # Filter matched entries
+#         # Extract matched keys and data
+#         matched_keys = [
+#             key for key, value in matching_history.items() if value[0]
+#         ]  # Filter matched entries
 
-        X_list = [
-            matching_history[key][1] for key in matched_keys
-        ]  # List of X matrices
+#         X_list = [
+#             matching_history[key][1] for key in matched_keys
+#         ]  # List of X matrices
 
-        Y_list = [
-            matching_history[key][2] for key in matched_keys
-        ]  # List of Y matrices
+#         Y_list = [
+#             matching_history[key][2] for key in matched_keys
+#         ]  # List of Y matrices
 
-        pseudo_rewards_list = [
-            matching_history[key][3] for key in matched_keys
-        ]  # List of pseudo_rewards
+#         pseudo_rewards_list = [
+#             matching_history[key][3] for key in matched_keys
+#         ]  # List of pseudo_rewards
 
-        prev_main = beta.reshape((self.M, self.N))
-        # Compute residuals for matched keys
+#         prev_main = beta.reshape((self.M, self.N))
+#         # Compute residuals for matched keys
 
-        loss = np.sum(
-            np.power(
-                pseudo_rewards_list
-                - np.einsum("tab,bc,tdc->tad", X_list, prev_main, Y_list),
-                2,
-            )
-        )
+#         loss = np.sum(
+#             np.power(
+#                 pseudo_rewards_list
+#                 - np.einsum("tab,bc,tdc->tad", X_list, prev_main, Y_list),
+#                 2,
+#             )
+#         )
 
-        # residuals_list = [
-        #     (pseudo_rewards - X @ prev_main @ Y.T) ** 2
-        #     for X, Y, pseudo_rewards in zip(X_list, Y_list, pseudo_rewards_list)
-        # ]
+#         # residuals_list = [
+#         #     (pseudo_rewards - X @ prev_main @ Y.T) ** 2
+#         #     for X, Y, pseudo_rewards in zip(X_list, Y_list, pseudo_rewards_list)
+#         # ]
 
-        # L1 regularization
-        l1_norm = np.sum(np.abs(beta))
+#         # L1 regularization
+#         l1_norm = np.sum(np.abs(beta))
 
-        # Total loss
-        return loss + lam * l1_norm
+#         # Total loss
+#         return loss + lam * l1_norm
 
-    def __get_param(self):
-        return {"param": self.Phi_hat, "impute": self.Phi_check}
+#     def __get_param(self):
+#         return {"param": self.Phi_hat, "impute": self.Phi_check}
 
 class BiRoLFLasso(ContextualBandit):
     def __init__(
@@ -2428,6 +2428,57 @@ class BiRoLFLasso_Blockwise(BiRoLFLasso):
         Gy = build_augmented_gram(self.G_Yo, self.N, self.dy)
         mu = self._last_lam_main / float(self.Gamma)
         return kkt_residual_matrix(Gx, Gy, self.B, self.Phi_hat, mu)
+
+
+class BiRoLFLasso_Blockwise_NoXAug(BiRoLFLasso_Blockwise):
+    """
+    BiRoLFLasso_Blockwise without augmentation on the x side.
+
+    X_static has shape (M, d_x) — observable features only (no orthogonal complement).
+    Y_static has shape (N, N) — fully augmented (observable + orthogonal complement).
+
+    As a consequence Phi / C_sum / B have shape (d_x, N) instead of (M, N), and
+    solve_main_blockwise operates with Mu = 0 (no uo/uu blocks solved).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Override all (M, N)-shaped matrices to (d_x, N)
+        self.C_sum = np.zeros((self.dx, self.N), dtype=float)
+        self.Phi_hat = np.zeros((self.dx, self.N), dtype=float)
+        self.Phi_check = np.zeros((self.dx, self.N), dtype=float)
+        self.impute_prev = np.zeros((self.dx, self.N), dtype=float)
+        self.main_prev = np.zeros((self.dx, self.N), dtype=float)
+        self.B = np.zeros((self.dx, self.N), dtype=float)
+        self.B_main_sum = np.zeros((self.dx, self.N), dtype=float)
+
+    def _init_blockwise_caches(self, x: np.ndarray, y: np.ndarray) -> None:
+        if self._block_caches_ready:
+            return
+        self._init_static_arms_if_needed(x, y)
+        # x is (M, d_x) — not augmented
+        assert x.shape[0] == self.M and x.shape[1] == self.dx
+        # y is (N, N) — fully augmented
+        assert y.shape[0] == self.N and y.shape[1] == self.N
+
+        if self.dx > 0:
+            self.G_Xo = x.T @ x   # x is (M, d_x), G_Xo = (d_x, d_x)
+            self.lam_x_max = float(np.max(np.linalg.eigvalsh(self.G_Xo)))
+        else:
+            self.G_Xo = np.zeros((0, 0), dtype=float)
+            self.lam_x_max = 0.0
+
+        if self.dy > 0:
+            y_obs = y[:, :self.dy]  # first d_y cols of augmented y
+            self.G_Yo = y_obs.T @ y_obs   # (d_y, d_y)
+            self.lam_y_max = float(np.max(np.linalg.eigvalsh(self.G_Yo)))
+        else:
+            self.G_Yo = np.zeros((0, 0), dtype=float)
+            self.lam_y_max = 0.0
+
+        self.kappa_x = self._compute_kappa(x)
+        self.kappa_y = self._compute_kappa(y)
+        self._block_caches_ready = True
 
 
 class LowOFUL(ContextualBandit):

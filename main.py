@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
-EXPERIMENT_COMMENT = "EMB_LIMIT_10"
+EXPERIMENT_COMMENT = "With NoXAug"
 
 MOTHER_PATH = "."
 
@@ -23,10 +23,11 @@ AGENT_DICT = {
     "lints": "LinTS",
     "rolf_lasso": "RoLF",
     "rolf_ridge": "RoLF-Ridge",
-    "birolf_lasso_old": "BiRoLF-Lasso-Old",
+    # "birolf_lasso_old": "BiRoLF-Lasso-Old",
     "birolf_lasso": "BiRoLF w/o Blockwise (Ours)",
     "birolf_lasso_blockwise": "BiRoLF (Ours)",
     "birolf_lasso_blockwise_imputation": "BiRoLF-Imputation",
+    "birolf_lasso_blockwise_noxaug": "BiRoLF-NoXAug",
     "estr_lowoful": "ESTR+LowOFUL(Jun2021)",
     "dr_lasso": "DRLasso",
     # Jang et al. (ICML 2021)
@@ -347,36 +348,6 @@ def bilinear_run_trial(
             d=total_obs_dim, arms=total_arms, lam1=1.0, lam2=0.5, zT=10, tr=True
         )
 
-    elif agent_type == "birolf_lasso_old":
-        if cfg.explore:
-            agent = BiRoLFLasso_old(
-                M=M,
-                N=N,
-                sigma=noise_std,
-                delta=cfg.delta,
-                p=cfg.p,
-                p1=cfg.p1,
-                p2=cfg.p2,
-                explore=cfg.explore,
-                init_explore=exp_map[cfg.init_explore],
-                theoretical_init_explore=False,
-                lam_c_impute=cfg.lamc_bi_impute,
-                lam_c_main=cfg.lamc_bi_main,
-            )
-        else:
-            agent = BiRoLFLasso_old(
-                M=M,
-                N=N,
-                sigma=noise_std,
-                delta=cfg.delta,
-                p=cfg.p,
-                p1=cfg.p1,
-                p2=cfg.p2,
-                theoretical_init_explore=False,
-                lam_c_impute=cfg.lamc_bi_impute,
-                lam_c_main=cfg.lamc_bi_main,
-            )
-
     elif agent_type == "birolf_lasso":
         if cfg.explore:
             agent = BiRoLFLasso(
@@ -523,6 +494,60 @@ def bilinear_run_trial(
                 block_use_batched=getattr(cfg, "block_use_batched", True),
             )
 
+    elif agent_type == "birolf_lasso_blockwise_noxaug":
+        if cfg.explore:
+            agent = BiRoLFLasso_Blockwise_NoXAug(
+                M=M,
+                N=N,
+                d_x=d_x,
+                d_y=d_y,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                explore=cfg.explore,
+                init_explore=exp_map[cfg.init_explore],
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+                block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+                block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+                block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+                block_tol=getattr(cfg, "block_tol", 1e-6),
+                block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
+            )
+        else:
+            agent = BiRoLFLasso_Blockwise_NoXAug(
+                M=M,
+                N=N,
+                d_x=d_x,
+                d_y=d_y,
+                sigma=noise_std,
+                delta=cfg.delta,
+                p=cfg.p,
+                p1=cfg.p1,
+                p2=cfg.p2,
+                theoretical_init_explore=False,
+                lam_c_impute=cfg.lamc_bi_impute,
+                lam_c_main=cfg.lamc_bi_main,
+                fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+                fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+                kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+                kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+                block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+                block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+                block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+                block_tol=getattr(cfg, "block_tol", 1e-6),
+                block_use_fista=getattr(cfg, "block_use_fista", True),
+                block_use_batched=getattr(cfg, "block_use_batched", True),
+            )
+
     elif agent_type == "estr_lowoful":
         agent = ESTRLowOFUL(
             d1=d_x,
@@ -593,6 +618,16 @@ def bilinear_run_trial(
     ):
         data_x = X.T
         data_y = Y.T
+    elif isinstance(agent, BiRoLFLasso_Blockwise_NoXAug):
+        # x side: no augmentation — pass observable features only (M, d_x)
+        data_x = X.T
+        # y side: augment as usual (N, N)
+        basis_Y = orthogonal_complement_basis(Y)
+        d_Y, N_val = Y.shape
+        if d_Y <= N_val:
+            data_y = np.hstack((Y.T, basis_Y))
+        else:
+            data_y = basis_Y
     else:
         # (M, M-d) matrix and each column vector denotes the orthogonal basis if M > d
         # (M, M) matrix from singular value decomposition if d > M
@@ -623,7 +658,7 @@ def bilinear_run_trial(
     # print(f"Agent : {agent.__class__.__name__}\t data shape : {data.shape}")
 
     # Set timing data for BiRoLF agents
-    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso_old', 'BiRoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
+    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
         agent._timing_data = timing_data
         agent._trial = now_trial
         agent._benchmark_mode = getattr(cfg, "benchmark_mode", False)
@@ -685,7 +720,7 @@ def bilinear_run(
     # For linear contextual bandits
     # For RoLF this is (MN,MN), otherwise (MN,d_x*d_y)
     z = None
-    if not isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
+    if not isinstance(agent, (BiRoLFLasso, BiRoLFLasso_Blockwise, BiRoLFLasso_Blockwise_Imputation, BiRoLFLasso_Blockwise_NoXAug, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
         z = np.kron(x, y)
 
     # z = np.kron(x, y)
@@ -706,7 +741,7 @@ def bilinear_run(
         )
 
         choose_start_time = time.perf_counter()
-        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
+        if isinstance(agent, (BiRoLFLasso, BiRoLFLasso_Blockwise, BiRoLFLasso_Blockwise_Imputation, BiRoLFLasso_Blockwise_NoXAug, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
             chosen_action = agent.choose(x, y)
         elif isinstance(agent, ContextualBandit):
             chosen_action = agent.choose(z)
@@ -751,7 +786,7 @@ def bilinear_run(
 
         ## update the agent with timing measurement
         update_start_time = time.perf_counter()
-        if isinstance(agent, (BiRoLFLasso_old, BiRoLFLasso, BiRoLFLasso_Blockwise, ESTRLowOFUL,JangEpsilonFALB, JangRoUCB)):
+        if isinstance(agent, (BiRoLFLasso, BiRoLFLasso_Blockwise, BiRoLFLasso_Blockwise_Imputation, BiRoLFLasso_Blockwise_NoXAug, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
             agent.update(x=x, y=y, r=chosen_reward)
         elif isinstance(agent, ContextualBandit):
             agent.update(x=z, r=chosen_reward)
@@ -854,9 +889,10 @@ def bilinear_show_result(
         if k not in {"BiRoLF w/o Blockwise (Ours)", "RoLF-Ridge"}
     ]
     style_map = {
-        "BiRoLF (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 12},
-        "BiRoLF w/o Blockwise (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 11},
+        "BiRoLF (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 13},
+        "BiRoLF w/o Blockwise (Ours)": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 12},
         
+        "BiRoLF-NoXAug": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 11},
         "BiRoLF-Imputation": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 10},
 
         "ESTR+LowOFUL": {"marker": "s", "linestyle": "-", "alpha": 1.0, "z": 9},
@@ -1036,7 +1072,6 @@ def plot_optimization_timing_comparison():
     # Create bars with different colors and transparency for variance
     palette = {
         "RoLFLasso": "#6B7280",
-        "BiRoLFLasso_old": "#9CA3AF",
         "BiRoLFLasso": "#E15759",
         "BiRoLFLasso_Blockwise": "#59A14F",
     }
@@ -1452,6 +1487,7 @@ def run_main(given_cfg = None):
         # "birolf_lasso_old",
         "birolf_lasso",
         "birolf_lasso_blockwise",
+        "birolf_lasso_blockwise_noxaug",
         "birolf_lasso_blockwise_imputation",
         "rolf_lasso",
         "dr_lasso",
@@ -1459,7 +1495,7 @@ def run_main(given_cfg = None):
         # "lints",
         "mab_ucb",
         "estr_lowoful",
-        
+
         # Jang et al. (ICML 2021)
         "jang_roucb",
         "jang_efalb",
@@ -1676,7 +1712,7 @@ def do_movie_experiment(
 
     # Title embedding: pre-trained model → truncated SVD → top-10 components
     title_emb_full = _st_embed(movies_df['Title'].values)          # (384, M)
-    k_title = min(10, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
+    k_title = min(4, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
     _, S_t, Vt_t = np.linalg.svd(title_emb_full, full_matrices=False)
     title_emb = np.diag(S_t[:k_title]) @ Vt_t[:k_title, :]        # (10, M)
 
@@ -1685,7 +1721,7 @@ def do_movie_experiment(
         np.mean(_st_embed(genres_str.split('|')), axis=1)
         for genres_str in movies_df['Genres'].values
     ], axis=1)                                                      # (384, M)
-    k_genre = min(10, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
+    k_genre = min(4, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
     _, S_g, Vt_g = np.linalg.svd(genre_emb_full, full_matrices=False)
     genre_emb = np.diag(S_g[:k_genre]) @ Vt_g[:k_genre, :]        # (10, M)
 
@@ -1886,16 +1922,6 @@ def bilinear_run_trial_movie(
             d=total_obs_dim, arms=total_arms, lam1=1.0, lam2=0.5, zT=10, tr=True,
         )
 
-    elif agent_type == "birolf_lasso_old":
-        kw = dict(
-            M=M, N=N, sigma=noise_std, delta=cfg.delta, p=cfg.p,
-            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
-            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
-        )
-        if cfg.explore:
-            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
-        agent = BiRoLFLasso_old(**kw)
-
     elif agent_type == "birolf_lasso":
         kw = dict(
             M=M, N=N, sigma=noise_std, delta=cfg.delta, p=cfg.p,
@@ -1952,6 +1978,27 @@ def bilinear_run_trial_movie(
             kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
         agent = BiRoLFLasso_Blockwise_Imputation(**kw)
 
+    elif agent_type == "birolf_lasso_blockwise_noxaug":
+        kw = dict(
+            M=M, N=N, d_x=d_x, d_y=d_y,
+            sigma=noise_std, delta=cfg.delta, p=cfg.p,
+            p1=cfg.p1, p2=cfg.p2, theoretical_init_explore=False,
+            lam_c_impute=cfg.lamc_bi_impute, lam_c_main=cfg.lamc_bi_main,
+            fista_max_iter=getattr(cfg, "bi_fista_max_iter", 200),
+            fista_tol=getattr(cfg, "bi_fista_tol", 1e-6),
+            kappa_cap=getattr(cfg, "kappa_cap", 0.0),
+            kappa_cap_percentile=getattr(cfg, "kappa_cap_percentile", 0.0),
+            block_oo_max_iter=getattr(cfg, "block_oo_max_iter", 100),
+            block_ou_max_iter=getattr(cfg, "block_ou_max_iter", 50),
+            block_uo_max_iter=getattr(cfg, "block_uo_max_iter", 50),
+            block_tol=getattr(cfg, "block_tol", 1e-6),
+            block_use_fista=getattr(cfg, "block_use_fista", True),
+            block_use_batched=getattr(cfg, "block_use_batched", True),
+        )
+        if cfg.explore:
+            kw.update(explore=cfg.explore, init_explore=exp_map[cfg.init_explore])
+        agent = BiRoLFLasso_Blockwise_NoXAug(**kw)
+
     elif agent_type == "estr_lowoful":
         agent = ESTRLowOFUL(
             d1=d_x, d2=d_y,
@@ -1978,6 +2025,13 @@ def bilinear_run_trial_movie(
     if isinstance(agent, (LinUCB, LinTS, DRLassoBandit, ESTRLowOFUL, JangEpsilonFALB, JangRoUCB)):
         data_x = X.T
         data_y = Y.T
+    elif isinstance(agent, BiRoLFLasso_Blockwise_NoXAug):
+        # x side: no augmentation — observable features only (M, d_x)
+        data_x = X.T
+        # y side: augment as usual (N, N)
+        basis_Y = orthogonal_complement_basis(Y)
+        d_Y, N_ = Y.shape
+        data_y = np.hstack((Y.T, basis_Y)) if d_Y <= N_ else basis_Y
     else:
         basis_X = orthogonal_complement_basis(X)
         basis_Y = orthogonal_complement_basis(Y)
@@ -1988,7 +2042,7 @@ def bilinear_run_trial_movie(
 
     # ── Timing setup ─────────────────────────────────────────────────────
     if agent.__class__.__name__ in [
-        'RoLFLasso', 'BiRoLFLasso_old', 'BiRoLFLasso',
+        'RoLFLasso', 'BiRoLFLasso',
         'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit',
     ]:
         agent._timing_data    = timing_data
@@ -2117,9 +2171,8 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
         movie_ids = None
         user_ids  = None
 
-    d_unobs_movie = getattr(cfg, 'movie_d_unobs', 4)
-    d_unobs_user  = getattr(cfg, 'user_d_unobs',  4)
-
+    d_unobs_movie = getattr(cfg, 'd_unobs_movie')
+    d_unobs_user  = getattr(cfg, 'd_unobs_user')
     # Peek at data dimensions for path naming (uses a fixed seed so it is stable)
     np.random.seed(cfg.seed)
     _, _, _, _, _, M, N, d_x, d_y, d_x_star, d_y_star = do_movie_experiment(
@@ -2153,6 +2206,7 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
     AGENTS = [
         "birolf_lasso",
         "birolf_lasso_blockwise",
+        "birolf_lasso_blockwise_noxaug",
         "birolf_lasso_blockwise_imputation",
         "rolf_lasso",
         "dr_lasso",

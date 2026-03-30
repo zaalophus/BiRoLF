@@ -14,7 +14,10 @@ def tuple_type(inputs):
     return tuple(map(float, inputs.split(',')))
 
 def get_cfg():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()    
+    parser.add_argument("--d_unobs_movie", type = int, default = 4)
+    parser.add_argument("--d_unobs_user", type = int, default = 4)
+    
     parser.add_argument("--explore", action="store_true", default=True)
     parser.add_argument("--init_explore", type=str, choices=["quad", "triple", "sqr", "K", "double","200"], default="double")
     parser.add_argument("--verbose", action="store_true", default=False)
@@ -110,7 +113,7 @@ def get_cfg():
                         help="Rank for rO-UCB (Jang 2021); defaults to min(dim_x, dim_y)")
     parser.add_argument("--jang_beta_scale", type=float, default=1.0,
                         help="Confidence radius scale for rO-UCB (Jang 2021)")
-
+    
     cfg = parser.parse_args()
     if cfg.p1 is None:
         cfg.p1 = cfg.p

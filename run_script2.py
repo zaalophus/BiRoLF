@@ -19,7 +19,9 @@ class Script:
             timing_log_every=50,
             sequential_benchmark=True,
             seed = 1,
-            kappa_cap_percentile = 0.99):
+            kappa_cap_percentile = 0.99,
+            d_unobs_movie = 4,
+            d_unobs_user = 4,):
         self.cfg = cfg
         self.cfg.trials = trials
         self.cfg.horizon = horizon
@@ -39,6 +41,8 @@ class Script:
         self.cfg.seed = seed
         self.cfg.kappa_cap_percentile = kappa_cap_percentile
         
+        self.cfg.d_unobs_movie = d_unobs_movie
+        self.cfg.d_unobs_user  = d_unobs_user
 
 # python main.py 
 # —trials 1 
@@ -61,7 +65,10 @@ if __name__ == "__main__":
     cfg = get_cfg()
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
 
-    for seed in [167,868,72151,12,468,752,18572,678,342,1426,786,835,1582]:
+    d_unobs_movie = 20
+    d_unobs_user = 20
+    
+    for seed in range(2031,2041):
         for case in [1,2,4,5]:
             now_script = Script(cfg,
                 trials=5,
@@ -74,12 +81,13 @@ if __name__ == "__main__":
                 timing_log_every=50,
                 sequential_benchmark=True,
                 seed = seed,
-                kappa_cap_percentile = 0)
-            # run_main(now_script.cfg)
-            run_movieLens(now_script.cfg,sampling=True,n_sample=30)
+                kappa_cap_percentile = 0,
+                d_unobs_movie = d_unobs_movie,
+                d_unobs_user = d_unobs_user,)
+            run_movieLens(now_script.cfg,sampling=True,n_sample=40)
                         
                         
-    # list_seed = [354,6516,265,452,1432,124,5236,768,798,97867]
+    # list_seed = [2111,2112,2113,2114,2115,2116,2117,2118,2119,2120]
     # list_true_dim = [15,20,25]
     # list_num_arm = [20,30,25]
     # list_dim = [7, 10,12]
