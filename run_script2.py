@@ -21,7 +21,11 @@ class Script:
             seed = 1,
             kappa_cap_percentile = 0.99,
             d_unobs_movie = 4,
-            d_unobs_user = 4,):
+            d_unobs_user = 4,
+            block_oo_max_iter = 30,
+            block_ou_max_iter = 20,
+            block_uo_max_iter = 20,
+            block_tol = 1e-4):
         self.cfg = cfg
         self.cfg.trials = trials
         self.cfg.horizon = horizon
@@ -43,6 +47,11 @@ class Script:
         
         self.cfg.d_unobs_movie = d_unobs_movie
         self.cfg.d_unobs_user  = d_unobs_user
+        
+        self.cfg.block_oo_max_iter = block_oo_max_iter
+        self.cfg.block_ou_max_iter = block_ou_max_iter
+        self.cfg.block_uo_max_iter = block_uo_max_iter
+        self.cfg.block_tol = block_tol
 
 # python main.py 
 # —trials 1 
@@ -65,14 +74,14 @@ if __name__ == "__main__":
     cfg = get_cfg()
 # default case : true_dim_x − arm_x < dim_x < arm_x -> arm_x=10,  true_dim_x=14, dim_x=5 
 
-    d_unobs_movie = 10
-    d_unobs_user = 10
+    d_unobs_movie = 8
+    d_unobs_user = 8
     
-    for seed in range(4051,4061):
+    for seed in range(9001,9011):
         for case in [1,2,4,5]:
             now_script = Script(cfg,
                 trials=5,
-                horizon=9000,
+                horizon=10000,
                 case=case,
                 explore=True,
                 init_explore="half",
@@ -83,8 +92,12 @@ if __name__ == "__main__":
                 seed = seed,
                 kappa_cap_percentile = 0,
                 d_unobs_movie = d_unobs_movie,
-                d_unobs_user = d_unobs_user,)
-            run_movieLens(now_script.cfg,sampling=True,n_sample=25)
+                d_unobs_user = d_unobs_user,
+                block_oo_max_iter = 30,
+                block_ou_max_iter = 20,
+                block_uo_max_iter = 20,
+                block_tol=1e-4)
+            run_movieLens(now_script.cfg,sampling=True,n_sample=40)
                         
                         
     # list_seed = [2111,2112,2113,2114,2115,2116,2117,2118,2119,2120]

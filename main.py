@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
-EXPERIMENT_COMMENT = "With NoXAug"
+EXPERIMENT_COMMENT = "Big_Experiment"
 
 MOTHER_PATH = "."
 
@@ -1710,20 +1710,20 @@ def do_movie_experiment(
 
     movie_year = movies_df['Year_norm'].values[np.newaxis, :]  # (1, M)
 
-    # Title embedding: pre-trained model → truncated SVD → top-10 components
-    title_emb_full = _st_embed(movies_df['Title'].values)          # (384, M)
-    k_title = min(4, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
+    # Title embedding: pre-trained model → truncated SVD → top-k right singular vectors (unit scale)
+    title_emb_full = _st_embed(movies_df['Title'].values)          # (768, M)
+    k_title = min(2, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
     _, S_t, Vt_t = np.linalg.svd(title_emb_full, full_matrices=False)
-    title_emb = np.diag(S_t[:k_title]) @ Vt_t[:k_title, :]        # (10, M)
+    title_emb = Vt_t[:k_title, :]                                  # (k_title, M), unit scale
 
-    # Genre embedding: mean-pool per-genre embeddings → truncated SVD → top-10 components
+    # Genre embedding: mean-pool per-genre embeddings → truncated SVD → top-k right singular vectors
     genre_emb_full = np.stack([
         np.mean(_st_embed(genres_str.split('|')), axis=1)
         for genres_str in movies_df['Genres'].values
-    ], axis=1)                                                      # (384, M)
-    k_genre = min(4, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
+    ], axis=1)                                                      # (768, M)
+    k_genre = min(2, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
     _, S_g, Vt_g = np.linalg.svd(genre_emb_full, full_matrices=False)
-    genre_emb = np.diag(S_g[:k_genre]) @ Vt_g[:k_genre, :]        # (10, M)
+    genre_emb = Vt_g[:k_genre, :]                                  # (k_genre, M), unit scale
 
     # d_obs = 1 (year) + 10 (title) + 10 (genre) = 21
     X_obs = np.concatenate([movie_year, title_emb, genre_emb], axis=0).astype(float)
@@ -1748,8 +1748,12 @@ def do_movie_experiment(
 
     zip_reg = np.array([_zip_region(z) for z in users_df['Zip'].values], dtype=float)
 
-    # Observable user features: Age, Occupation, Zip-region  (Gender excluded)
-    Y_obs = np.stack([age_norm, occ_norm, zip_reg], axis=0)  # (d_y, N)
+    # Observable user features: Age, Occupation, Zip-region + 4 random normal dims
+    N_users = users_df.shape[0]
+    rand_user = np.random.randn(2, N_users)
+    Y_obs = np.vstack([age_norm[np.newaxis, :], occ_norm[np.newaxis, :],
+                       zip_reg[np.newaxis, :], rand_user])  # (7, N)
+    
     d_y   = Y_obs.shape[0]
     N     = Y_obs.shape[1]
     all_user_ids = users_df['UserID'].values
