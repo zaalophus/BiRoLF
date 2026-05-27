@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
-EXPERIMENT_COMMENT = "Big_Experiment"
+EXPERIMENT_COMMENT = "adding_bilinear_baseline"
 
 MOTHER_PATH = "."
 
@@ -1006,7 +1006,7 @@ def bilinear_run_agent(args):
     # Save timing data to temporary file for this process
     agent_display_name = AGENT_DICT[agent_type]
     # Create unique filename including experiment parameters to avoid collisions
-    timing_file = f"/tmp/timing_{agent_type}_{now_trial}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_noise_{cfg.reward_std}_run_{RUN_TAG}.pkl"
+    timing_file = f"/tmp/seed_{cfg.seed}_case_{cfg.case}_timing_{agent_type}_{now_trial}_M_{cfg.arm_x}_N_{cfg.arm_y}_xstar_{cfg.true_dim_x}_ystar_{cfg.true_dim_y}_dx_{cfg.dim_x}_dy_{cfg.dim_y}_T_{cfg.horizon}_noise_{cfg.reward_std}_run_{RUN_TAG}.pkl"
     timing_info = {
         'optimization_times': local_timing_data.get('optimization', local_timing_data),
         'timing_breakdown': local_timing_data.get('breakdown', {}),
@@ -1446,7 +1446,7 @@ def run_main(given_cfg = None):
     date = datetime.now().strftime('%Y-%m-%d')
     RUN_TAG = dt.now().strftime("%H%M")
 
-    target_path = f"4. Rebuttal/exp_{EXPERIMENT_COMMENT}_{cfg.init_explore}_seed_{cfg.seed}_arm_{cfg.arm_x}_dim_{cfg.dim_x}_true_dim_{cfg.true_dim_x}"
+    target_path = f"5. Camera_Ready/{EXPERIMENT_COMMENT}_explore_{cfg.init_explore}_seed_{cfg.seed}_arm_{cfg.arm_x}_dim_{cfg.dim_x}_true_dim_{cfg.true_dim_x}"
     if cfg.case == 4:
         RESULT_PATH = f"{MOTHER_PATH}/{target_path}/results/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
         FIGURE_PATH = f"{MOTHER_PATH}/{target_path}/figures/{date}/case_3_seed_{cfg.seed}_p_{cfg.p}_std_{cfg.reward_std}"
@@ -1487,12 +1487,12 @@ def run_main(given_cfg = None):
         # "birolf_lasso_old",
         "birolf_lasso",
         "birolf_lasso_blockwise",
-        "birolf_lasso_blockwise_noxaug",
-        "birolf_lasso_blockwise_imputation",
+        # "birolf_lasso_blockwise_noxaug",
+        # "birolf_lasso_blockwise_imputation",
         "rolf_lasso",
         "dr_lasso",
-        # "linucb",
-        # "lints",
+        "linucb",
+        "lints",
         "mab_ucb",
         "estr_lowoful",
 
@@ -1668,11 +1668,15 @@ def do_movie_experiment(
     d_unobs_user: int = 4,
     movie_ids=None,
     user_ids=None,
+    use_embedding: bool = True,
+    use_random_user_obs: bool = True,
+    n_random_user_obs: int = 2,
 ):
     """
     Load MovieLens data and build a bilinear bandit problem.
 
-    Observable movie features : Year (norm) + 18 genre indicators  → d_x dims
+    Observable movie features (use_embedding=True) : Year (norm) + title SVD + genre SVD
+    Observable movie features (use_embedding=False): Year (norm) + 18 genre indicators
     Observable user  features : Age (norm), Occupation (norm), Zip-region (norm) → 3 dims
 
     Adds d_unobs_movie / d_unobs_user unobservable dimensions according to `case`
@@ -1686,6 +1690,14 @@ def do_movie_experiment(
         Restrict to this subset of MovieIDs.  None → all movies.
     user_ids  : array-like or None
         Restrict to this subset of UserIDs.   None → all users.
+    use_embedding : bool
+        If True (default), encode title and genre with a sentence-transformer model.
+        If False, use raw 18-dim genre indicator vectors instead (no neural embedding).
+    use_random_user_obs : bool
+        If True (default), append random normal dimensions to observable user features.
+        If False, use only Age, Occupation, Zip-region (3 dims).
+    n_random_user_obs : int
+        Number of random normal dimensions to append when use_random_user_obs=True. Default 2.
 
     Returns
     -------
@@ -1710,23 +1722,38 @@ def do_movie_experiment(
 
     movie_year = movies_df['Year_norm'].values[np.newaxis, :]  # (1, M)
 
-    # Title embedding: pre-trained model → truncated SVD → top-k right singular vectors (unit scale)
-    title_emb_full = _st_embed(movies_df['Title'].values)          # (768, M)
-    k_title = min(2, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
-    _, S_t, Vt_t = np.linalg.svd(title_emb_full, full_matrices=False)
-    title_emb = Vt_t[:k_title, :]                                  # (k_title, M), unit scale
+    if use_embedding:
+        # Title embedding: pre-trained model → truncated SVD → top-k right singular vectors (unit scale)
+        title_emb_full = _st_embed(movies_df['Title'].values)          # (768, M)
+        k_title = min(2, title_emb_full.shape[0] - 1, title_emb_full.shape[1] - 1)
+        _, S_t, Vt_t = np.linalg.svd(title_emb_full, full_matrices=False)
+        title_emb = Vt_t[:k_title, :]                                  # (k_title, M), unit scale
 
-    # Genre embedding: mean-pool per-genre embeddings → truncated SVD → top-k right singular vectors
-    genre_emb_full = np.stack([
-        np.mean(_st_embed(genres_str.split('|')), axis=1)
-        for genres_str in movies_df['Genres'].values
-    ], axis=1)                                                      # (768, M)
-    k_genre = min(2, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
-    _, S_g, Vt_g = np.linalg.svd(genre_emb_full, full_matrices=False)
-    genre_emb = Vt_g[:k_genre, :]                                  # (k_genre, M), unit scale
+        # Genre embedding: mean-pool per-genre embeddings → truncated SVD → top-k right singular vectors
+        genre_emb_full = np.stack([
+            np.mean(_st_embed(genres_str.split('|')), axis=1)
+            for genres_str in movies_df['Genres'].values
+        ], axis=1)                                                      # (768, M)
+        k_genre = min(2, genre_emb_full.shape[0] - 1, genre_emb_full.shape[1] - 1)
+        _, S_g, Vt_g = np.linalg.svd(genre_emb_full, full_matrices=False)
+        genre_emb = Vt_g[:k_genre, :]                                  # (k_genre, M), unit scale
 
-    # d_obs = 1 (year) + 10 (title) + 10 (genre) = 21
-    X_obs = np.concatenate([movie_year, title_emb, genre_emb], axis=0).astype(float)
+        X_obs = np.concatenate([movie_year, title_emb, genre_emb], axis=0).astype(float)
+    else:
+        # No embedding: use 18-dim genre indicator vectors (one-hot multi-label)
+        all_genres = [
+            "Action", "Adventure", "Animation", "Children's", "Comedy",
+            "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir",
+            "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
+            "Thriller", "War", "Western",
+        ]
+        genre_indicator = np.zeros((len(all_genres), len(movies_df)), dtype=float)
+        for col_idx, genres_str in enumerate(movies_df['Genres'].values):
+            for g in str(genres_str).split('|'):
+                if g in all_genres:
+                    genre_indicator[all_genres.index(g), col_idx] = 1.0
+
+        X_obs = np.concatenate([movie_year, genre_indicator], axis=0).astype(float)
     M     = X_obs.shape[1]
 
     # Guard: d_x must be strictly less than M so orthogonal_complement_basis
@@ -1748,11 +1775,15 @@ def do_movie_experiment(
 
     zip_reg = np.array([_zip_region(z) for z in users_df['Zip'].values], dtype=float)
 
-    # Observable user features: Age, Occupation, Zip-region + 4 random normal dims
+    # Observable user features: Age, Occupation, Zip-region (+ optional random dims)
     N_users = users_df.shape[0]
-    rand_user = np.random.randn(2, N_users)
-    Y_obs = np.vstack([age_norm[np.newaxis, :], occ_norm[np.newaxis, :],
-                       zip_reg[np.newaxis, :], rand_user])  # (7, N)
+    base_user = np.vstack([age_norm[np.newaxis, :], occ_norm[np.newaxis, :],
+                           zip_reg[np.newaxis, :]])  # (3, N)
+    if use_random_user_obs and n_random_user_obs > 0:
+        rand_user = np.random.randn(n_random_user_obs, N_users)
+        Y_obs = np.vstack([base_user, rand_user])
+    else:
+        Y_obs = base_user
     
     d_y   = Y_obs.shape[0]
     N     = Y_obs.shape[1]
@@ -2092,6 +2123,9 @@ def bilinear_run_agent_movie(args):
             d_unobs_user=d_unobs_user,
             movie_ids=movie_ids,
             user_ids=user_ids,
+            use_embedding=getattr(cfg, 'use_embedding', True),
+            use_random_user_obs=getattr(cfg, 'use_random_user_obs', True),
+            n_random_user_obs=getattr(cfg, 'n_random_user_obs', 2),
         )
 
     target_case = {4: 3, 5: 4}.get(cfg.case, cfg.case)
@@ -2185,11 +2219,14 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
         d_unobs_user=d_unobs_user,
         movie_ids=movie_ids,
         user_ids=user_ids,
+        use_embedding=getattr(cfg, 'use_embedding', True),
+        use_random_user_obs=getattr(cfg, 'use_random_user_obs', True),
+        n_random_user_obs=getattr(cfg, 'n_random_user_obs', 2),
     )
 
     target_case = {4: 3, 5: 4}.get(cfg.case, cfg.case)
     target_path = (
-        f"4. Rebuttal/movieLens_{EXPERIMENT_COMMENT}_exp_{cfg.init_explore}_seed_{cfg.seed}"
+        f"5. Camera_Ready/movieLens_{EXPERIMENT_COMMENT}_explore_{cfg.init_explore}_seed_{cfg.seed}"
         f"_M_{M}_N_{N}_dim_{d_x}_true_dim_{d_x_star}"
     )
     RESULT_PATH = (

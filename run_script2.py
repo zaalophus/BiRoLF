@@ -1,5 +1,6 @@
 from main import run_main, run_movieLens
 from cfg import get_cfg
+import subprocess
 
 class Script:
     def __init__(self, cfg,
@@ -22,6 +23,9 @@ class Script:
             kappa_cap_percentile = 0.99,
             d_unobs_movie = 4,
             d_unobs_user = 4,
+            use_embedding = True,
+            use_random_user_obs = True,
+            n_random_user_obs = 2,
             block_oo_max_iter = 30,
             block_ou_max_iter = 20,
             block_uo_max_iter = 20,
@@ -44,9 +48,12 @@ class Script:
         self.cfg.sequential_benchmark = sequential_benchmark
         self.cfg.seed = seed
         self.cfg.kappa_cap_percentile = kappa_cap_percentile
-        
+
         self.cfg.d_unobs_movie = d_unobs_movie
         self.cfg.d_unobs_user  = d_unobs_user
+        self.cfg.use_embedding = use_embedding
+        self.cfg.use_random_user_obs = use_random_user_obs
+        self.cfg.n_random_user_obs = n_random_user_obs
         
         self.cfg.block_oo_max_iter = block_oo_max_iter
         self.cfg.block_ou_max_iter = block_ou_max_iter
@@ -76,28 +83,142 @@ if __name__ == "__main__":
 
     d_unobs_movie = 8
     d_unobs_user = 8
+    use_embedding = True
+    use_random_user_obs = True
+    n_random_user_obs = 2
     
-    for seed in range(9001,9011):
+    session_name = subprocess.check_output(['tmux','display-message','-p','#S'],text=True).strip()
+    print(session_name)
+    
+    # if session_name == "pjh1":
+    #     case = 1
+    #     seed = 432 
+    #     now_script = Script(cfg,
+    #                 trials=5,
+    #                 horizon=4000,
+    #                 case=case,
+    #                 explore=True,
+    #                 init_explore="half",
+    #                 timing_breakdown=True,
+    #                 profile_ops=True,
+    #                 timing_log_every=50,
+    #                 sequential_benchmark=False,
+    #                 seed = seed,
+    #                 kappa_cap_percentile = 0,
+    #                 d_unobs_movie = d_unobs_movie,
+    #                 d_unobs_user = d_unobs_user,
+    #                 block_oo_max_iter = 200,
+    #                 block_ou_max_iter = 200,
+    #                 block_uo_max_iter = 200,
+    #                 block_tol=1e-4,
+    #                 use_embedding = use_embedding,
+    #                 use_random_user_obs=use_random_user_obs,
+    #                 n_random_user_obs=n_random_user_obs)
+    #     run_main(now_script.cfg)
+    
+    # if session_name == "pjh2":
+    #     case = 2
+    #     seed = 2224 
+    #     now_script = Script(cfg,
+    #                 trials=5,
+    #                 horizon=4000,
+    #                 case=case,
+    #                 explore=True,
+    #                 init_explore="half",
+    #                 timing_breakdown=True,
+    #                 profile_ops=True,
+    #                 timing_log_every=50,
+    #                 sequential_benchmark=False,
+    #                 seed = seed,
+    #                 kappa_cap_percentile = 0,
+    #                 d_unobs_movie = d_unobs_movie,
+    #                 d_unobs_user = d_unobs_user,
+    #                 block_oo_max_iter = 200,
+    #                 block_ou_max_iter = 200,
+    #                 block_uo_max_iter = 200,
+    #                 block_tol=1e-4,
+    #                 use_embedding = use_embedding,
+    #                 use_random_user_obs=use_random_user_obs,
+    #                 n_random_user_obs=n_random_user_obs)
+    #     run_main(now_script.cfg)
+    
+    # if session_name == "pjh3":
+    #     case = 4
+    #     seed = 463 
+    #     now_script = Script(cfg,
+    #                 trials=5,
+    #                 horizon=4000,
+    #                 case=case,
+    #                 explore=True,
+    #                 init_explore="half",
+    #                 timing_breakdown=True,
+    #                 profile_ops=True,
+    #                 timing_log_every=50,
+    #                 sequential_benchmark=False,
+    #                 seed = seed,
+    #                 kappa_cap_percentile = 0,
+    #                 d_unobs_movie = d_unobs_movie,
+    #                 d_unobs_user = d_unobs_user,
+    #                 block_oo_max_iter = 200,
+    #                 block_ou_max_iter = 200,
+    #                 block_uo_max_iter = 200,
+    #                 block_tol=1e-4,
+    #                 use_embedding = use_embedding,
+    #                 use_random_user_obs=use_random_user_obs,
+    #                 n_random_user_obs=n_random_user_obs)
+    #     run_main(now_script.cfg)
+    
+    # if session_name == "pjh4":
+    #     case = 5
+    #     seed = 553 
+    #     now_script = Script(cfg,
+    #                 trials=5,
+    #                 horizon=4000,
+    #                 case=case,
+    #                 explore=True,
+    #                 init_explore="half",
+    #                 timing_breakdown=True,
+    #                 profile_ops=True,
+    #                 timing_log_every=50,
+    #                 sequential_benchmark=False,
+    #                 seed = seed,
+    #                 kappa_cap_percentile = 0,
+    #                 d_unobs_movie = d_unobs_movie,
+    #                 d_unobs_user = d_unobs_user,
+    #                 block_oo_max_iter = 200,
+    #                 block_ou_max_iter = 200,
+    #                 block_uo_max_iter = 200,
+    #                 block_tol=1e-4,
+    #                 use_embedding = use_embedding,
+    #                 use_random_user_obs=use_random_user_obs,
+    #                 n_random_user_obs=n_random_user_obs)
+    #     run_main(now_script.cfg)
+    
+    base_seed = 300
+    for seed in [base_seed+5*int(session_name[-1])-4,base_seed+int(session_name[-1])*5]:
         for case in [1,2,4,5]:
             now_script = Script(cfg,
                 trials=5,
-                horizon=10000,
+                horizon=4000,
                 case=case,
                 explore=True,
                 init_explore="half",
                 timing_breakdown=True,
                 profile_ops=True,
                 timing_log_every=50,
-                sequential_benchmark=True,
+                sequential_benchmark=False,
                 seed = seed,
                 kappa_cap_percentile = 0,
                 d_unobs_movie = d_unobs_movie,
                 d_unobs_user = d_unobs_user,
-                block_oo_max_iter = 30,
-                block_ou_max_iter = 20,
-                block_uo_max_iter = 20,
-                block_tol=1e-4)
-            run_movieLens(now_script.cfg,sampling=True,n_sample=40)
+                block_oo_max_iter = 200,
+                block_ou_max_iter = 200,
+                block_uo_max_iter = 200,
+                block_tol=1e-4,
+                use_embedding = use_embedding,
+                use_random_user_obs=use_random_user_obs,
+                n_random_user_obs=n_random_user_obs)
+            run_main(now_script.cfg)
                         
                         
     # list_seed = [2111,2112,2113,2114,2115,2116,2117,2118,2119,2120]
