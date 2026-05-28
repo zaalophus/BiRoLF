@@ -117,9 +117,10 @@ if __name__ == "__main__":
     #             n_random_user_obs=n_random_user_obs)
     #         run_main(now_script.cfg)
                         
-    base_seed = 50000
+    start_seed = 50000
     interval = 20
-    for seed in range(base_seed+interval*(int(session_name[-1])-5)-(interval-1),base_seed+(int(session_name[-1])-5)*interval):
+    end_seed = start_seed + interval
+    for seed in range(start_seed,end_seed):
         for case in [1,2,4,5]:
             now_script = Script(cfg,
                 trials=5,
