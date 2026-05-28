@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 import os
 
-EXPERIMENT_COMMENT = "adding_bilinear_baseline"
+EXPERIMENT_COMMENT = "MovieLens_CameraReady"
 
 MOTHER_PATH = "."
 
@@ -26,9 +26,9 @@ AGENT_DICT = {
     # "birolf_lasso_old": "BiRoLF-Lasso-Old",
     "birolf_lasso": "BiRoLF w/o Blockwise (Ours)",
     "birolf_lasso_blockwise": "BiRoLF (Ours)",
-    "birolf_lasso_blockwise_imputation": "BiRoLF-Imputation",
-    "birolf_lasso_blockwise_noxaug": "BiRoLF-NoXAug",
-    "estr_lowoful": "ESTR+LowOFUL(Jun2021)",
+    "birolf_lasso_blockwise_imputation": "BiRoLF w/o DR",
+    "birolf_lasso_blockwise_noxaug": "BiRoLF w/o XAug",
+    "estr_lowoful": "ESTR+LowOFUL(Jun 2019)",
     "dr_lasso": "DRLasso",
     # Jang et al. (ICML 2021)
     "jang_efalb": r"$\epsilon$-FALB (Jang 2021)",
@@ -658,7 +658,7 @@ def bilinear_run_trial(
     # print(f"Agent : {agent.__class__.__name__}\t data shape : {data.shape}")
 
     # Set timing data for BiRoLF agents
-    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge', 'DRLassoBandit']:
+    if hasattr(agent, '__class__') and agent.__class__.__name__ in ['RoLFLasso', 'BiRoLFLasso', 'BiRoLFLasso_Blockwise', 'RoLFRidge']:
         agent._timing_data = timing_data
         agent._trial = now_trial
         agent._benchmark_mode = getattr(cfg, "benchmark_mode", False)
@@ -1435,7 +1435,13 @@ def _init_worker(given_cfg, result_path, figure_path, log_path, run_tag):
     _maybe_set_blas_threads()
 
 def run_main(given_cfg = None):
-    global cfg, date, RUN_TAG, RESULT_PATH, FIGURE_PATH, LOG_PATH 
+    global cfg, date, RUN_TAG, RESULT_PATH, FIGURE_PATH, LOG_PATH
+    global TIMING_DATA, TIMING_BREAKDOWN, TIMING_ITERS, TOTAL_EXECUTION_TIMES
+
+    TIMING_DATA.clear()
+    TIMING_BREAKDOWN.clear()
+    TIMING_ITERS.clear()
+    TOTAL_EXECUTION_TIMES.clear()
 
     if given_cfg is None:
         cfg = get_cfg()
@@ -1487,12 +1493,12 @@ def run_main(given_cfg = None):
         # "birolf_lasso_old",
         "birolf_lasso",
         "birolf_lasso_blockwise",
-        # "birolf_lasso_blockwise_noxaug",
-        # "birolf_lasso_blockwise_imputation",
+        "birolf_lasso_blockwise_noxaug",
+        "birolf_lasso_blockwise_imputation",
         "rolf_lasso",
         "dr_lasso",
-        "linucb",
-        "lints",
+        # "linucb",
+        # "lints",
         "mab_ucb",
         "estr_lowoful",
 
@@ -1596,9 +1602,8 @@ def run_main(given_cfg = None):
             if agent_name not in TOTAL_EXECUTION_TIMES:
                 TOTAL_EXECUTION_TIMES[agent_name] = []
             # Ensure list is long enough
-            while len(TOTAL_EXECUTION_TIMES[agent_name]) <= trial_num:
-                TOTAL_EXECUTION_TIMES[agent_name].append(0)
-            TOTAL_EXECUTION_TIMES[agent_name][trial_num] = total_time
+            TOTAL_EXECUTION_TIMES[agent_name].append(total_time)
+            
             
             # Clean up temporary file
             os.remove(timing_file)
@@ -2186,6 +2191,11 @@ def run_movieLens(given_cfg = None, sampling: bool = False, n_sample: int = 0):
     """
     global cfg, date, RUN_TAG, RESULT_PATH, FIGURE_PATH, LOG_PATH
     global TIMING_DATA, TIMING_BREAKDOWN, TIMING_ITERS, TOTAL_EXECUTION_TIMES
+    
+    TIMING_DATA.clear()
+    TIMING_BREAKDOWN.clear() 
+    TIMING_ITERS.clear()
+    TOTAL_EXECUTION_TIMES.clear()
 
     if given_cfg is None:
         cfg = get_cfg()
